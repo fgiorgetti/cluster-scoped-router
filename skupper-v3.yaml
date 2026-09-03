@@ -1,0 +1,196 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: skupper-router
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: skupper-router
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  - configmaps
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: skupper-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: skupper-router
+subjects:
+- kind: ServiceAccount
+  name: skupper-router
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: skupper-router
+  name: skupper-router-v3
+spec:
+  selector:
+    matchLabels:
+      app: skupper-router
+  template:
+    metadata:
+      labels:
+        app: skupper-router
+    spec:
+      containers:
+      - name: router
+        image: quay.io/skupper/skupper-router:main
+        imagePullPolicy: Always
+        env:
+        - name: QDROUTERD_CONF
+          value: /etc/skupper-router/skrouterd.json
+        - name: QDROUTERD_CONF_TYPE
+          value: json
+        - name: SKUPPER_SITE_ID
+          value: ___UUID___
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 9090
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 9090
+            scheme: HTTP
+          initialDelaySeconds: 1
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources: {}
+        volumeMounts:
+        - name: skupper-router
+          mountPath: /etc/skupper-router
+        - name: skupper-router-certs
+          mountPath: /etc/skupper-router-certs/skupper-router-inter-router
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        runAsNonRoot: true
+      serviceAccount: skupper-router
+      serviceAccountName: skupper-router
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: skupper-router
+        configMap:
+          name: skupper-router
+      - name: skupper-router-certs
+        secret:
+          secretName: skupper-router-inter-router
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: skupper-router
+  name: skupper-router
+spec:
+  ports:
+  - name: "5672"
+    port: 5672
+    protocol: TCP
+    targetPort: 5672
+  selector:
+    app: skupper-router
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skupper-router
+data:
+  skrouterd.json: |-
+    [
+        [
+            "router",
+            {
+                "id": "___SITE_NAME___-${HOSTNAME}",
+                "mode": "interior",
+                "helloMaxAgeSeconds": "3",
+                "metadata": "{\"id\":\"___UUID___\",\"version\":\"v3\",\"platform\":\"kubernetes\"}"
+            }
+        ],
+        [
+            "network",
+            {
+                "networkId": "___VAN_ID___"
+            }
+        ],
+        [
+            "sslProfile",
+            {
+                "name": "skupper-router-inter-router-profile",
+                "certFile": "/etc/skupper-router-certs/skupper-router-inter-router/tls.crt",
+                "privateKeyFile": "/etc/skupper-router-certs/skupper-router-inter-router/tls.key",
+                "caCertFile": "/etc/skupper-router-certs/skupper-router-inter-router/ca.crt"
+            }
+        ],
+        [
+            "listener",
+            {
+                "name": "skupper-router-inter-router",
+                "role": "inter-router",
+                "port": 45671,
+                "sslProfile": "skupper-router-inter-router-profile",
+                "saslMechanisms": "EXTERNAL",
+                "authenticatePeer": true
+            }
+        ],
+        [
+            "listener",
+            {
+                "name": "@9090",
+                "role": "normal",
+                "port": 9090,
+                "http": true,
+                "httpRootDir": "disabled",
+                "healthz": true,
+                "metrics": true
+            }
+        ],
+        [
+            "listener",
+            {
+                "name": "amqp",
+                "host": "localhost",
+                "port": 5672
+            }
+        ],
+        [
+            "address",
+            {
+                "prefix": "mc",
+                "distribution": "multicast"
+            }
+        ]
+    ]
