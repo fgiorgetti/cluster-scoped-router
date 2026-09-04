@@ -49,7 +49,7 @@ spec:
     spec:
       containers:
       - name: router
-        image: quay.io/skupper/skupper-router:main
+        image: quay.io/fgiorgetti/skupper-router:main
         imagePullPolicy: Always
         env:
         - name: QDROUTERD_CONF
@@ -83,7 +83,7 @@ spec:
         - name: skupper-router
           mountPath: /etc/skupper-router
         - name: skupper-router-certs
-          mountPath: /etc/skupper-router-certs/skupper-router-inter-router
+          mountPath: /etc/skupper-router-certs/skupper-router-inter-edge
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -106,7 +106,7 @@ spec:
           name: skupper-router
       - name: skupper-router-certs
         secret:
-          secretName: skupper-router-inter-router
+          secretName: skupper-router-inter-edge
 ---
 apiVersion: v1
 kind: Service
@@ -135,7 +135,7 @@ data:
             "router",
             {
                 "id": "___SITE_NAME___-${HOSTNAME}",
-                "mode": "interior",
+                "mode": "edge",
                 "helloMaxAgeSeconds": "3",
                 "metadata": "{\"id\":\"___UUID___\",\"version\":\"v3\",\"platform\":\"kubernetes\"}"
             }
@@ -149,19 +149,19 @@ data:
         [
             "sslProfile",
             {
-                "name": "skupper-router-inter-router-profile",
-                "certFile": "/etc/skupper-router-certs/skupper-router-inter-router/tls.crt",
-                "privateKeyFile": "/etc/skupper-router-certs/skupper-router-inter-router/tls.key",
-                "caCertFile": "/etc/skupper-router-certs/skupper-router-inter-router/ca.crt"
+                "name": "skupper-router-inter-edge-profile",
+                "certFile": "/etc/skupper-router-certs/skupper-router-inter-edge/tls.crt",
+                "privateKeyFile": "/etc/skupper-router-certs/skupper-router-inter-edge/tls.key",
+                "caCertFile": "/etc/skupper-router-certs/skupper-router-inter-edge/ca.crt"
             }
         ],
         [
             "listener",
             {
-                "name": "skupper-router-inter-router",
-                "role": "inter-router",
+                "name": "skupper-router-inter-edge",
+                "role": "inter-edge",
                 "port": 45671,
-                "sslProfile": "skupper-router-inter-router-profile",
+                "sslProfile": "skupper-router-inter-edge-profile",
                 "saslMechanisms": "EXTERNAL",
                 "authenticatePeer": true
             }

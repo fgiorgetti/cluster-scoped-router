@@ -97,12 +97,12 @@ setup_ingress() {
         echo " Detected OpenShift cluster."
         echo " Exposing skupper-router on port ${INTER_EDGE_PORT} via ClusterIP service and TLS passthrough route..."
 
-        # Create ClusterIP service for inter-router listener
-        cat <<EOF | kubectl apply -n "$NAMESPACE" -f - || die "Failed to create inter-router service on OpenShift."
+        # Create ClusterIP service for inter-edge listener
+        cat <<EOF | kubectl apply -n "$NAMESPACE" -f - || die "Failed to create inter-edge service on OpenShift."
 apiVersion: v1
 kind: Service
 metadata:
-  name: skupper-router-inter-router
+  name: skupper-router-inter-edge
   labels:
     app: skupper-router
 spec:
@@ -110,24 +110,24 @@ spec:
   selector:
     app: skupper-router
   ports:
-  - name: inter-router
+  - name: inter-edge
     port: ${INTER_EDGE_PORT}
     targetPort: ${INTER_EDGE_PORT}
     protocol: TCP
 EOF
 
         # Create Route with TLS passthrough
-        cat <<EOF | kubectl apply -n "$NAMESPACE" -f - || die "Failed to create inter-router route on OpenShift."
+        cat <<EOF | kubectl apply -n "$NAMESPACE" -f - || die "Failed to create inter-edge route on OpenShift."
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: skupper-router-inter-router
+  name: skupper-router-inter-edge
   labels:
     app: skupper-router
 spec:
   to:
     kind: Service
-    name: skupper-router-inter-router
+    name: skupper-router-inter-edge
   port:
     targetPort: ${INTER_EDGE_PORT}
   tls:
@@ -137,15 +137,15 @@ EOF
         # Retrieve Route hostname
         echo " Waiting for route hostname..."
         for _ in {1..30}; do
-            ENDPOINT_HOST=$(kubectl get route skupper-router-inter-router -n "$NAMESPACE" -o jsonpath='{.spec.host}' 2>/dev/null || true)
+            ENDPOINT_HOST=$(kubectl get route skupper-router-inter-edge -n "$NAMESPACE" -o jsonpath='{.spec.host}' 2>/dev/null || true)
             if [[ -z "$ENDPOINT_HOST" ]]; then
-                ENDPOINT_HOST=$(kubectl get route skupper-router-inter-router -n "$NAMESPACE" -o jsonpath='{.status.ingress[0].host}' 2>/dev/null || true)
+                ENDPOINT_HOST=$(kubectl get route skupper-router-inter-edge -n "$NAMESPACE" -o jsonpath='{.status.ingress[0].host}' 2>/dev/null || true)
             fi
             [[ -n "$ENDPOINT_HOST" ]] && break
             sleep 1
         done
 
-        [[ -n "$ENDPOINT_HOST" ]] || die "Failed to retrieve hostname for route skupper-router-inter-router."
+        [[ -n "$ENDPOINT_HOST" ]] || die "Failed to retrieve hostname for route skupper-router-inter-edge."
         ENDPOINT_PORT="443"
     else
         echo " Detected generic Kubernetes cluster."
@@ -155,7 +155,7 @@ EOF
 apiVersion: v1
 kind: Service
 metadata:
-  name: skupper-router-inter-router
+  name: skupper-router-inter-edge
   labels:
     app: skupper-router
 spec:
@@ -163,7 +163,7 @@ spec:
   selector:
     app: skupper-router
   ports:
-  - name: inter-router
+  - name: inter-edge
     port: ${INTER_EDGE_PORT}
     targetPort: ${INTER_EDGE_PORT}
     protocol: TCP
@@ -172,9 +172,9 @@ EOF
         # Retrieve LoadBalancer IP or hostname
         echo " Waiting for LoadBalancer external IP / hostname..."
         for _ in {1..30}; do
-            ENDPOINT_HOST=$(kubectl get svc skupper-router-inter-router -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            ENDPOINT_HOST=$(kubectl get svc skupper-router-inter-edge -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
             if [[ -z "$ENDPOINT_HOST" ]]; then
-                ENDPOINT_HOST=$(kubectl get svc skupper-router-inter-router -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+                ENDPOINT_HOST=$(kubectl get svc skupper-router-inter-edge -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
             fi
             [[ -n "$ENDPOINT_HOST" ]] && break
             sleep 2
@@ -264,7 +264,7 @@ generate_certificates_and_secrets() {
 apiVersion: v1
 kind: Secret
 metadata:
-  name: skupper-router-inter-router
+  name: skupper-router-inter-edge
   namespace: ${NAMESPACE}
 type: kubernetes.io/tls
 data:
@@ -278,7 +278,7 @@ EOF
 apiVersion: v1
 kind: Secret
 metadata:
-  name: skupper-router-inter-router
+  name: skupper-router-inter-edge
 type: kubernetes.io/tls
 data:
   ca.crt: ${b64_ca}

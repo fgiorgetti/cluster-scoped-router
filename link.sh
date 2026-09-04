@@ -97,7 +97,7 @@ main() {
   "name": "link/${target_cluster}",
   "host": "${host}",
   "port": ${port},
-  "role": "inter-router",
+  "role": "inter-edge",
   "sslProfile": "client-${target_cluster}"
 }
 EOF

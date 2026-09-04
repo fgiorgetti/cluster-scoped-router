@@ -40,19 +40,19 @@ while IFS= read -r name; do
     kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage delete --type tcpConnector --name "${name}" || true
 done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type tcpConnector 2>/dev/null | jq -r '.[].name' 2>/dev/null || true)
 
-echo "  Deleting existing connector entities (role=inter-router)"
+echo "  Deleting existing connector entities (role=inter-edge)"
 # Collect sslProfiles referenced by connectors before deletion
 ssl_profiles=()
 while IFS= read -r profile; do
     [[ -z "$profile" ]] && continue
     ssl_profiles+=("$profile")
-done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="inter-router") | .sslProfile // empty' 2>/dev/null || true)
+done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="inter-edge") | .sslProfile // empty' 2>/dev/null || true)
 
 while IFS= read -r name; do
     [[ -z "$name" ]] && continue
     echo "    skmanage delete --type connector --name ${name}"
     kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage delete --type connector --name "${name}" || true
-done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="inter-router") | .name' 2>/dev/null || true)
+done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="inter-edge") | .name' 2>/dev/null || true)
 
 echo "  Deleting sslProfiles used by deleted connectors"
 for profile in "${ssl_profiles[@]}"; do
