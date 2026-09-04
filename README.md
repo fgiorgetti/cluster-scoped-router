@@ -1,0 +1,242 @@
+# cluster-scoped-router
+
+Scripts to deploy and operate a cluster-scoped skupper-router site without the
+Skupper controller. Each script is interactive (dialog-based TUI) and operates
+against the cluster pointed to by the current `kubectl` context.
+
+Generated configuration is written under `cluster/<context-name>/` and applied
+to the live cluster by `sync-conf.sh`.
+
+---
+
+## Prerequisites
+
+### Tools
+
+| Tool | Used by |
+|---|---|
+| `dialog` | `install-site.sh`, `link.sh`, `connector.sh`, `listener.sh` |
+| `kubectl` | all scripts |
+| `jq` | `link.sh`, `listener.sh`, `cleanup-conf.sh` |
+| `openssl` | `install-site.sh` |
+| `sed`, `awk` | `install-site.sh`, `listener.sh` |
+
+### Repository file
+
+`skupper-v3.yaml` must be present in the repository root. `install-site.sh`
+uses it as the router manifest template.
+
+### Cluster access
+
+Set `KUBECONFIG` (or rely on `~/.kube/config`) so that `kubectl config
+current-context` returns the correct cluster name before running any script.
+The context name is also used as the directory name under `cluster/`.
+
+---
+
+## Scripts
+
+### `install-site.sh`
+
+Installs the skupper-router into the `skupper` namespace as a DaemonSet and
+sets up inter-cluster ingress and TLS.
+
+**Interactive prompts**
+
+| Prompt | Description |
+|---|---|
+| Site Name | Arbitrary label for this site |
+| VAN ID | Identifier shared across all clusters in the same VAN |
+
+**What it does**
+
+1. Creates the `skupper` namespace if it does not exist.
+2. Detects the cluster type:
+   - **OpenShift** — creates a `ClusterIP` service and a TLS-passthrough `Route`.
+   - **Kubernetes** — creates a `LoadBalancer` service; falls back to a node IP
+     if the load balancer remains pending.
+3. Generates a self-signed CA, server certificate, and client certificate with
+   `openssl`.
+4. Applies the server secret to the `skupper` namespace.
+5. Substitutes site name, UUID, and VAN ID into `skupper-v3.yaml` and applies
+   it.
+
+**Generated files**
+
+```
+cluster/<context>/
+├── server-secret.yaml   # server TLS secret (applied to the cluster)
+├── client-secret.yaml   # client TLS secret (shared with other clusters via link.sh)
+└── server.json          # inter-edge host and port (read by link.sh on other clusters)
+```
+
+---
+
+### `link.sh`
+
+Links the current cluster to another cluster by reading that cluster's
+`server.json` and `client-secret.yaml` and writing the corresponding connector
+and SSL profile configuration locally.
+
+**Requires** that `install-site.sh` has been run on both clusters so that
+`cluster/<target>/server.json` and `cluster/<target>/client-secret.yaml` exist.
+
+**Interactive prompts**
+
+| Prompt | Description |
+|---|---|
+| Target cluster | Selected from the list of available `cluster/*/server.json` entries (current cluster excluded) |
+
+**Generated files**
+
+```
+cluster/<current>/skupper/router/
+├── connector/<target>.json          # inter-edge connector to the target cluster
+└── sslProfile/client-<target>.json  # SSL profile referencing the client certificate
+
+cluster/<current>/skupper/kube/
+└── secret_client-<target>.yaml      # Kubernetes Secret with the client certificate
+```
+
+Run `sync-conf.sh` afterwards to apply these files to the live cluster.
+
+---
+
+### `connector.sh`
+
+Exposes a workload running on the current cluster into the VAN under a routing
+key.
+
+**Interactive prompts**
+
+| Prompt | Description |
+|---|---|
+| Namespace | Namespace where the workload runs |
+| Target | Deployment, StatefulSet, or Pod to expose |
+| Port | Destination port on the pod (1–65535) |
+| Routing key | Address used to identify this service in the VAN |
+
+**Generated files**
+
+One file per matching pod:
+
+```
+cluster/<context>/<namespace>/router/tcpConnector/<pod>_<pod-ip>.json
+```
+
+Each file contains the connector name, pod IP, port, and routing key address.
+
+Run `sync-conf.sh` afterwards to apply these files to the live router.
+
+---
+
+### `listener.sh`
+
+Detects routing keys available in the VAN and creates a Kubernetes Service and
+EndpointSlice on the current cluster so that workloads can consume the remote
+service.
+
+**Requires** that the router is running (queries it live via `skstat`).
+
+**Interactive prompts**
+
+| Prompt | Description |
+|---|---|
+| Routing key | Selected from live router data or entered manually |
+| Namespace | Namespace that will receive the new Service |
+| Service name | Name for the Kubernetes Service |
+| Service port | Port exposed by the Service (1–65535) |
+
+**Generated files**
+
+```
+cluster/<context>/skupper/router/tcpListener/<routing-key>.json
+cluster/<context>/<namespace>/kube/service_<service>.yaml
+cluster/<context>/<namespace>/kube/endpointslice_<service>.yaml
+```
+
+The listener port is allocated automatically starting from 1024, reusing an
+existing file if one already exists for the routing key.
+
+Run `sync-conf.sh` afterwards to apply these files to the live cluster and
+router.
+
+---
+
+### `sync-conf.sh`
+
+Applies all configuration generated by `link.sh`, `connector.sh`, and
+`listener.sh` to the live cluster and router.
+
+**What it does (in order)**
+
+1. Calls `cleanup-conf.sh` to remove all previously applied router entities and
+   labeled Kubernetes resources.
+2. Applies every `cluster/<context>/*/kube/*.yaml` manifest with `kubectl`.
+3. Patches the `skupper-router-v3` DaemonSet to mount any new client-certificate
+   Secrets and waits for the rollout to complete.
+4. Applies SSL profiles, inter-edge connectors, and all other router entities
+   (tcpConnector, tcpListener, …) via `skmanage`.
+
+**No interactive prompts.** Uses the current `kubectl` context.
+
+> **Note:** `sync-conf.sh` performs a full re-apply on every run — it always
+> cleans up first and then reapplies from the files under `cluster/<context>/`.
+> Re-running it after any change to the generated files is safe and idempotent.
+
+---
+
+### `cleanup-conf.sh`
+
+Removes all previously applied consumed-service resources and router entities
+from the live cluster. Called automatically by `sync-conf.sh`, but can also be
+run standalone.
+
+**What it deletes**
+
+| Resource | Selector |
+|---|---|
+| Kubernetes Services (all namespaces) | `van-service-type=consume` |
+| Kubernetes EndpointSlices (all namespaces) | `skupper.io/type=endpointslice` |
+| Router `tcpListener` entities | all |
+| Router `tcpConnector` entities | all |
+| Router inter-edge `connector` entities | all |
+| Router `sslProfile` entities | those referenced by the deleted connectors |
+
+**No interactive prompts.** Uses the current `kubectl` context.
+
+> **Note:** `cleanup-conf.sh` does **not** delete the `skupper` namespace, the
+> router DaemonSet, or the `cluster/` directory. Only live applied resources are
+> removed.
+
+---
+
+## Typical end-to-end workflow
+
+Run the following steps in order. Steps 1 and 2 must be completed on **every
+cluster** in the VAN. Steps 3–5 are per-cluster and per-workload.
+
+```
+1. install-site.sh   — on each cluster: deploy the router and generate certs
+2. link.sh           — on each cluster: generate connector config toward every
+                       other cluster in the VAN (repeat for each peer)
+3. connector.sh      — on the cluster that exposes a workload
+4. listener.sh       — on the cluster that consumes the workload
+5. sync-conf.sh      — on each cluster: apply all generated config to the
+                       live router (re-run after any change to steps 2–4)
+```
+
+---
+
+## Start from scratch
+
+To tear down a site completely and remove all generated configuration:
+
+```bash
+kubectl delete ns skupper
+rm -rf cluster/
+```
+
+This deletes the router DaemonSet and all associated Kubernetes resources, and
+removes the entire local `cluster/` directory including certificates and
+generated JSON/YAML files.
