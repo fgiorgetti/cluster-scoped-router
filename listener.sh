@@ -55,13 +55,8 @@ pick_routing_key() {
         [[ -n "$key" ]] && keys+=("$key" "")
     done < <(
         kubectl -n skupper exec daemonsets/skupper-router-v3 -- \
-            skmanage query --type link 2>/dev/null \
-            | jq -r '.[].owningAddr
-                | select(. != null and .[0:1] == "M")
-                | select((contains("/") or contains(":") or contains(".")
-                    or contains("$") or contains("Lqdhello")) | not)
-                | .[1:]' 2>/dev/null \
-            | sort -u
+            skstat -a 2>/dev/null | grep ' mobile ' \
+            | grep -v -E '(\.|/|\$)' | awk '{print $2}'
     )
 
     if (( ${#keys[@]} == 0 )); then
