@@ -20,9 +20,11 @@ cluster=$(kubectl config current-context) || die "could not determine current ku
 
 echo "==> Cleaning up previous configuration for cluster '${cluster}'"
 
-echo "  Deleting services labeled van-service-type=consume/expose from all namespaces"
+echo "  Deleting services labeled van-service-type=consume from all namespaces"
 kubectl delete svc --all-namespaces -l van-service-type=consume || true
-kubectl delete svc --all-namespaces -l van-service-type=expose  || true
+
+echo "  Deleting endpointslices labeled skupper.io/type=endpointslice from all namespaces"
+kubectl delete endpointslices --all-namespaces -l 'skupper.io/type=endpointslice' || true
 
 echo "  Deleting existing tcpListener entities"
 while IFS= read -r name; do

@@ -174,7 +174,6 @@ ensure_skupper_listener() {
 
     local skupper_base="cluster/${cluster}/skupper"
     local listener_dir="${skupper_base}/router/tcpListener"
-    local kube_dir="${skupper_base}/kube"
     local listener_file="${listener_dir}/${routing_key}.json"
 
     if [[ -f "$listener_file" ]]; then
@@ -185,7 +184,7 @@ ensure_skupper_listener() {
 
     local listener_port
     listener_port=$(next_connector_listener_port "$cluster")
-    mkdir -p "$listener_dir" "$kube_dir"
+    mkdir -p "$listener_dir"
 
     cat << EOF > "${listener_file}"
 {
@@ -195,26 +194,15 @@ ensure_skupper_listener() {
 }
 EOF
 
-    cat << EOF > "${kube_dir}/service_port-${listener_port}.yaml"
-apiVersion: v1
-kind: Service
-metadata:
-  name: port-${listener_port}
-  labels:
-    van-service-type: expose
-spec:
-  type: ClusterIP
-  selector:
-    app: skupper-router
-  ports:
-  - port: ${svc_port}
-    targetPort: ${listener_port}
-    protocol: TCP
-EOF
-
     echo " Listener port  : $listener_port"
     echo " Listener file  : ${listener_file}"
-    echo " Service file   : ${kube_dir}/service_port-${listener_port}.yaml"
+}
+
+# ─── return the pod name, ip and ready condition for all router pods ─────────
+
+pick_router_endpoints() {
+    kubectl -n skupper get pod -l app=skupper-router -o json | \
+        jq -r '.items[] | .metadata.namespace + " " + .metadata.name + " " + (.status | .podIP + " " + (.conditions[] | select(.type == "Ready") | .status))'
 }
 
 # ─── main ────────────────────────────────────────────────────────────────────
@@ -229,6 +217,9 @@ main() {
     svc_info=$(pick_service)        || { clear; exit 0; }
     svc_name=$(awk 'NR==1' <<< "$svc_info")
     svc_port=$(awk 'NR==2' <<< "$svc_info")
+    router_endpoints=$(pick_router_endpoints)
+
+    [ -z "${router_endpoints}" ] && die "No router pods found"
 
     clear
     cluster=$(kubectl config current-context)
@@ -237,12 +228,49 @@ main() {
 
     # Build output paths
     local kube_dir="cluster/${cluster}/${namespace}/kube"
+    local endpointslice_file="${kube_dir}/endpointslice_${svc_name}.yaml"
     local service_file="${kube_dir}/service_${svc_name}.yaml"
     local external_target="port-${target_port}.skupper.svc.cluster.local"
 
     mkdir -p "$kube_dir"
 
-    # Write Kubernetes ExternalName Service YAML
+    # Build the endpoints YAML block from router_endpoints
+    local endpoints_yaml=""
+    while IFS=' ' read -r ep_ns ep_name ep_ip ep_ready; do
+        # Map kubectl's "True"/"False" to YAML true/false
+        local ready_val="false"
+        [[ "$ep_ready" == "True" ]] && ready_val="true"
+
+        endpoints_yaml+="  - addresses:
+    - \"${ep_ip}\"
+    conditions:
+      ready: ${ready_val}
+    targetRef:
+      kind: Pod
+      name: ${ep_name}
+      namespace: ${ep_ns}"
+    done <<< "$router_endpoints"
+
+    # Write Kubernetes EndpointSlice YAML
+    cat > "$endpointslice_file" << EOF
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: ${svc_name}
+  labels:
+    kubernetes.io/service-name: ${svc_name}
+    skupper.io/type: endpointslice
+addressType: IPv4
+ports:
+  - name: ${svc_name}-${svc_port}
+    appProtocol: http
+    protocol: TCP
+    port: ${target_port}
+endpoints:
+${endpoints_yaml}
+EOF
+
+    # Write Kubernetes Service YAML
     cat > "$service_file" << EOF
 apiVersion: v1
 kind: Service
@@ -251,12 +279,11 @@ metadata:
   namespace: ${namespace}
   labels:
     van-service-type: consume
-
 spec:
-  type: ExternalName
-  externalName: ${external_target}
+  type: ClusterIP
   ports:
-  - port: ${svc_port}
+  - name: ${svc_name}-${svc_port}
+    port: ${svc_port}
     targetPort: ${target_port}
     protocol: TCP
 EOF
@@ -273,6 +300,7 @@ EOF
     echo ""
     echo " Files written:"
     echo "  $service_file"
+    echo "  $endpointslice_file"
     echo "──────────────────────────────────────"
     echo ""
     echo " Skupper files (created if missing above):"
