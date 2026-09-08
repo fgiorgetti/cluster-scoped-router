@@ -49,7 +49,7 @@ spec:
     spec:
       containers:
       - name: router
-        image: quay.io/fgiorgetti/skupper-router:main
+        image: quay.io/skupper/skupper-router:main
         imagePullPolicy: Always
         env:
         - name: QDROUTERD_CONF
