@@ -60,6 +60,9 @@ sets up inter-cluster ingress and TLS.
 4. Applies the server secret to the `skupper` namespace.
 5. Substitutes site name, UUID, and VAN ID into `skupper-v3.yaml` and applies
    it.
+6. Applies a default-deny `NetworkPolicy` (`skupper-router-default-deny`) to
+   the `skupper` namespace. It allows ingress only from within the namespace
+   itself and from any IP on the inter-edge port (45671).
 
 **Generated files**
 
@@ -153,10 +156,15 @@ service.
 cluster/<context>/skupper/router/tcpListener/<routing-key>.json
 cluster/<context>/<namespace>/kube/service_<service>.yaml
 cluster/<context>/<namespace>/kube/endpointslice_<service>.yaml
+cluster/<context>/skupper/kube/networkpolicy_skupper-router-<namespace>-<service>.yaml
 ```
 
 The listener port is allocated automatically starting from 1024, reusing an
 existing file if one already exists for the routing key.
+
+A per-listener `NetworkPolicy` is also generated in the `skupper` namespace. It
+allows ingress to the router pods from the consuming namespace on the allocated
+listener port only.
 
 Run `sync-conf.sh` afterwards to apply these files to the live cluster and
 router.
