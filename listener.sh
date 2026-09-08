@@ -204,13 +204,13 @@ write_network_policy() {
     local skupper_kube_dir="cluster/${cluster}/skupper/kube"
     mkdir -p "$skupper_kube_dir"
 
-    local np_file="${skupper_kube_dir}/networkpolicy_skupper-router-${svc_name}.yaml"
+    local np_file="${skupper_kube_dir}/networkpolicy_skupper-router-${namespace}-${svc_name}.yaml"
 
     cat > "$np_file" << EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: skupper-router-${svc_name}
+  name: skupper-router-${namespace}-${svc_name}
   namespace: skupper
 spec:
   podSelector:
@@ -335,7 +335,7 @@ EOF
     echo " Files written:"
     echo "  $service_file"
     echo "  $endpointslice_file"
-    echo "  cluster/${cluster}/skupper/kube/networkpolicy_skupper-router-${svc_name}.yaml"
+    echo "  cluster/${cluster}/skupper/kube/networkpolicy_skupper-router-${namespace}-${svc_name}.yaml"
     echo "──────────────────────────────────────"
     echo ""
     echo " Skupper files (created if missing above):"
