@@ -193,6 +193,44 @@ EOF
     echo " Listener file  : ${listener_file}"
 }
 
+# ─── write per-listener NetworkPolicy into skupper namespace ─────────────────
+
+write_network_policy() {
+    local cluster="$1"
+    local namespace="$2"
+    local svc_name="$3"
+    local target_port="$4"
+
+    local skupper_kube_dir="cluster/${cluster}/skupper/kube"
+    mkdir -p "$skupper_kube_dir"
+
+    local np_file="${skupper_kube_dir}/networkpolicy_skupper-router-${svc_name}.yaml"
+
+    cat > "$np_file" << EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: skupper-router-${svc_name}
+  namespace: skupper
+spec:
+  podSelector:
+    matchLabels:
+      app: skupper-router
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ${namespace}
+    ports:
+    - protocol: TCP
+      port: ${target_port}
+EOF
+
+    echo " NetworkPolicy  : ${np_file}"
+}
+
 # ─── return the pod name, ip and ready condition for all router pods ─────────
 
 pick_router_endpoints() {
@@ -220,6 +258,7 @@ main() {
     cluster=$(kubectl config current-context)
     ensure_skupper_listener "$cluster" "$routing_key"
     target_port=$(get_routing_key_port "$cluster" "$routing_key")
+    write_network_policy "$cluster" "$namespace" "$svc_name" "$target_port"
 
     # Build output paths
     local kube_dir="cluster/${cluster}/${namespace}/kube"
@@ -296,6 +335,7 @@ EOF
     echo " Files written:"
     echo "  $service_file"
     echo "  $endpointslice_file"
+    echo "  cluster/${cluster}/skupper/kube/networkpolicy_skupper-router-${svc_name}.yaml"
     echo "──────────────────────────────────────"
     echo ""
     echo " Skupper files (created if missing above):"

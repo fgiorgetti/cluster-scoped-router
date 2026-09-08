@@ -301,6 +301,33 @@ EOF
 
 # ─── apply manifest ──────────────────────────────────────────────────────────
 
+apply_network_policy() {
+    echo " Applying default-deny NetworkPolicy to namespace '${NAMESPACE}'..."
+    cat <<EOF | kubectl apply -n "$NAMESPACE" -f - \
+        || die "Failed to apply default-deny NetworkPolicy."
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: skupper-router-default-deny
+  namespace: ${NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ${NAMESPACE}
+  - from:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: ${INTER_EDGE_PORT}
+EOF
+}
+
 apply_manifest() {
     local site_name="$1"
     local uuid="$2"
@@ -350,6 +377,8 @@ main() {
     generate_certificates_and_secrets "$ENDPOINT_HOST" "$ENDPOINT_PORT" "$cluster"
 
     apply_manifest "$site_name" "$uuid" "$van_id"
+
+    apply_network_policy
 
     echo ""
     echo " ✓ Installation complete."
