@@ -304,7 +304,8 @@ main() {
     mkdir -p "$kube_dir"
 
     # Build the endpoints YAML block from router_endpoints
-    local addresses_yaml="  - addresses:"
+    local addresses_yaml="  - addresses:
+"
     while IFS=' ' read -r ep_ip; do
         addresses_yaml+="    - \"${ep_ip}\"
 "
