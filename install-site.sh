@@ -230,7 +230,7 @@ full_mesh() {
         [ ${#targets[@]} -eq 0 ] && break
 
         # creating the mesh connector
-        for target in ${targets[@]}; do
+        for target in ${!targets[@]}; do
             target_ip_name="${targets[${target}]//./-}"
             echo skmanage create --type connector --name "mesh/${target}" "host=${target_ip_name}.skupper-router-mesh" "port=45671" "role=inter-edge" "sslProfile=mesh-profile"
             echo kubectl -n "$NAMESPACE" exec pod/${pod} -- \
