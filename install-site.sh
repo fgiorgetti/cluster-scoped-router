@@ -7,7 +7,7 @@ set -uo pipefail
 
 BACKTITLE="Skupper Site Installer"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MANIFEST="${SCRIPT_DIR}/skupper-v3.yaml"
+MANIFEST="${SCRIPT_DIR}/skupper-multi-tenant.yaml"
 INTER_EDGE_PORT=45671
 
 TMPFILE=$(mktemp)
@@ -59,7 +59,7 @@ pick_namespace() {
     local value
     while true; do
         dlg --title "Namespace" \
-            --inputbox "Enter the namespace to install into:" 8 55 "skupper-v3" || { clear; exit 0; }
+            --inputbox "Enter the namespace to install into:" 8 55 "skupper-multi-tenant" || { clear; exit 0; }
         value=$(result)
         [[ -n "$value" ]] && { echo "$value"; return 0; }
         dlg --msgbox "Namespace cannot be empty. Please try again." 6 50

@@ -23,7 +23,7 @@ to the live cluster by `sync-conf.sh`.
 
 ### Repository file
 
-`skupper-v3.yaml` must be present in the repository root. `install-site.sh`
+`skupper-multi-tenant.yaml` must be present in the repository root. `install-site.sh`
 uses it as the router manifest template.
 
 ### Cluster access
@@ -58,7 +58,7 @@ sets up inter-cluster ingress and TLS.
 3. Generates a self-signed CA, server certificate, and client certificate with
    `openssl`.
 4. Applies the server secret to the `skupper` namespace.
-5. Substitutes site name, UUID, and VAN ID into `skupper-v3.yaml` and applies
+5. Substitutes site name, UUID, and VAN ID into `skupper-multi-tenant.yaml` and applies
    it.
 6. Applies a default-deny `NetworkPolicy` (`skupper-router-default-deny`) to
    the `skupper` namespace. It allows ingress only from within the namespace
