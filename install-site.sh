@@ -8,7 +8,6 @@ set -uo pipefail
 BACKTITLE="Skupper Site Installer"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MANIFEST="${SCRIPT_DIR}/skupper-v3.yaml"
-NAMESPACE="skupper"
 INTER_EDGE_PORT=45671
 
 TMPFILE=$(mktemp)
@@ -54,141 +53,32 @@ pick_site_name() {
     done
 }
 
-pick_van_id() {
+# ─── namespace ───────────────────────────────────────────────────────────────
+
+pick_namespace() {
     local value
     while true; do
-        dlg --title "VAN ID" \
-            --inputbox "Enter the VAN ID:" 8 55 "" || { clear; exit 0; }
+        dlg --title "Namespace" \
+            --inputbox "Enter the namespace to install into:" 8 55 "skupper-v3" || { clear; exit 0; }
         value=$(result)
         [[ -n "$value" ]] && { echo "$value"; return 0; }
-        dlg --msgbox "VAN ID cannot be empty. Please try again." 6 50
+        dlg --msgbox "Namespace cannot be empty. Please try again." 6 50
     done
 }
 
-# ─── namespace ───────────────────────────────────────────────────────────────
-
 ensure_namespace() {
-    if ! kubectl get ns "$NAMESPACE" &>/dev/null; then
-        echo " Creating namespace '$NAMESPACE' ..."
-        kubectl create ns "$NAMESPACE" \
-            || die "Failed to create namespace '$NAMESPACE'."
+    if kubectl get ns "$NAMESPACE" &>/dev/null; then
+        die "Namespace '$NAMESPACE' already exists. Aborting installation."
     fi
-}
-
-# ─── pre-flight check ────────────────────────────────────────────────────────
-
-check_no_controller() {
-    if kubectl get deployment skupper-controller -n "$NAMESPACE" &>/dev/null; then
-        die "Namespace '$NAMESPACE' already has a Deployment named 'skupper-controller'.\nAborting installation."
-    fi
+    echo " Creating namespace '$NAMESPACE' ..."
+    kubectl create ns "$NAMESPACE" \
+        || die "Failed to create namespace '$NAMESPACE'."
 }
 
 # ─── cluster detection & ingress ─────────────────────────────────────────────
 
 is_openshift() {
     kubectl api-resources --api-group=route.openshift.io -o name 2>/dev/null | grep -q "^routes"
-}
-
-setup_ingress() {
-    ENDPOINT_HOST=""
-    ENDPOINT_PORT=""
-
-    if is_openshift; then
-        echo " Detected OpenShift cluster."
-        echo " Exposing skupper-router on port ${INTER_EDGE_PORT} via ClusterIP service and TLS passthrough route..."
-
-        # Create ClusterIP service for inter-edge listener
-        cat <<EOF | kubectl apply -n "$NAMESPACE" -f - || die "Failed to create inter-edge service on OpenShift."
-apiVersion: v1
-kind: Service
-metadata:
-  name: skupper-router-inter-edge
-  labels:
-    app: skupper-router
-spec:
-  type: ClusterIP
-  selector:
-    app: skupper-router
-  ports:
-  - name: inter-edge
-    port: ${INTER_EDGE_PORT}
-    targetPort: ${INTER_EDGE_PORT}
-    protocol: TCP
-EOF
-
-        # Create Route with TLS passthrough
-        cat <<EOF | kubectl apply -n "$NAMESPACE" -f - || die "Failed to create inter-edge route on OpenShift."
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: skupper-router-inter-edge
-  labels:
-    app: skupper-router
-spec:
-  to:
-    kind: Service
-    name: skupper-router-inter-edge
-  port:
-    targetPort: ${INTER_EDGE_PORT}
-  tls:
-    termination: passthrough
-EOF
-
-        # Retrieve Route hostname
-        echo " Waiting for route hostname..."
-        for _ in {1..30}; do
-            ENDPOINT_HOST=$(kubectl get route skupper-router-inter-edge -n "$NAMESPACE" -o jsonpath='{.spec.host}' 2>/dev/null || true)
-            if [[ -z "$ENDPOINT_HOST" ]]; then
-                ENDPOINT_HOST=$(kubectl get route skupper-router-inter-edge -n "$NAMESPACE" -o jsonpath='{.status.ingress[0].host}' 2>/dev/null || true)
-            fi
-            [[ -n "$ENDPOINT_HOST" ]] && break
-            sleep 1
-        done
-
-        [[ -n "$ENDPOINT_HOST" ]] || die "Failed to retrieve hostname for route skupper-router-inter-edge."
-        ENDPOINT_PORT="443"
-    else
-        echo " Detected generic Kubernetes cluster."
-        echo " Exposing skupper-router on port ${INTER_EDGE_PORT} via LoadBalancer service..."
-
-        cat <<EOF | kubectl apply -n "$NAMESPACE" -f - || die "Failed to create LoadBalancer service."
-apiVersion: v1
-kind: Service
-metadata:
-  name: skupper-router-inter-edge
-  labels:
-    app: skupper-router
-spec:
-  type: LoadBalancer
-  selector:
-    app: skupper-router
-  ports:
-  - name: inter-edge
-    port: ${INTER_EDGE_PORT}
-    targetPort: ${INTER_EDGE_PORT}
-    protocol: TCP
-EOF
-
-        # Retrieve LoadBalancer IP or hostname
-        echo " Waiting for LoadBalancer external IP / hostname..."
-        for _ in {1..30}; do
-            ENDPOINT_HOST=$(kubectl get svc skupper-router-inter-edge -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
-            if [[ -z "$ENDPOINT_HOST" ]]; then
-                ENDPOINT_HOST=$(kubectl get svc skupper-router-inter-edge -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            fi
-            [[ -n "$ENDPOINT_HOST" ]] && break
-            sleep 2
-        done
-
-        if [[ -z "$ENDPOINT_HOST" ]]; then
-            # Fallback to first node IP or cluster IP if load balancer is pending
-            ENDPOINT_HOST=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null || true)
-            [[ -z "$ENDPOINT_HOST" ]] && ENDPOINT_HOST=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)
-            [[ -z "$ENDPOINT_HOST" ]] && ENDPOINT_HOST="127.0.0.1"
-            echo " Warning: LoadBalancer ingress IP not immediately assigned; falling back to: ${ENDPOINT_HOST}"
-        fi
-        ENDPOINT_PORT="${INTER_EDGE_PORT}"
-    fi
 }
 
 # ─── tls certificates & secrets ──────────────────────────────────────────────
@@ -331,14 +221,12 @@ EOF
 apply_manifest() {
     local site_name="$1"
     local uuid="$2"
-    local van_id="$3"
 
     [[ -f "$MANIFEST" ]] || die "Manifest not found: $MANIFEST"
 
     sed \
         -e "s|___SITE_NAME___|${site_name}|g" \
         -e "s|___UUID___|${uuid}|g"           \
-        -e "s|___VAN_ID___|${van_id}|g"       \
         "$MANIFEST" \
     | kubectl apply -n "$NAMESPACE" -f - \
         || die "kubectl apply failed."
@@ -347,10 +235,10 @@ apply_manifest() {
 # ─── main ────────────────────────────────────────────────────────────────────
 
 main() {
-    local site_name uuid van_id cluster
+    local site_name uuid cluster
 
+    NAMESPACE=$(pick_namespace)
     site_name=$(pick_site_name)
-    van_id=$(pick_van_id)
     uuid=$(generate_uuid)
     cluster=$(kubectl config current-context 2>/dev/null || echo "default")
     [[ -n "$cluster" ]] || cluster="default"
@@ -362,23 +250,19 @@ main() {
     echo " Cluster    : ${cluster}"
     echo " Namespace  : ${NAMESPACE}"
     echo " Site Name  : ${site_name}"
-    echo " VAN ID     : ${van_id}"
     echo " UUID       : ${uuid}"
     echo "──────────────────────────────────────────"
     echo ""
 
     ensure_namespace
-    check_no_controller
 
-    setup_ingress
+    generate_certificates_and_secrets "*.skupper-router-mesh" "45671" "$cluster"
 
-    echo " Resolved ingress endpoint : ${ENDPOINT_HOST}:${ENDPOINT_PORT}"
-
-    generate_certificates_and_secrets "$ENDPOINT_HOST" "$ENDPOINT_PORT" "$cluster"
-
-    apply_manifest "$site_name" "$uuid" "$van_id"
+    apply_manifest "$site_name" "$uuid"
 
     apply_network_policy
+
+    echo "${NAMESPACE}" > "cluster/${cluster}/namespace"
 
     echo ""
     echo " ✓ Installation complete."
@@ -386,6 +270,7 @@ main() {
     echo "   - cluster/${cluster}/server-secret.yaml"
     echo "   - cluster/${cluster}/client-secret.yaml"
     echo "   - cluster/${cluster}/server.json"
+    echo "   - cluster/${cluster}/namespace"
     echo "──────────────────────────────────────────"
 }
 

@@ -217,6 +217,8 @@ EOF
 
     fi
     echo "──────────────────────────────────────"
+    echo ""
+    echo "Please run sync-conf.sh to apply changes"
 
 }
 

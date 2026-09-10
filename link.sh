@@ -6,7 +6,7 @@ set -uo pipefail
 
 shopt -s nullglob
 
-BACKTITLE="Skupper Inter-Cluster Link"
+BACKTITLE="Skupper MultiTenantSite to Backbone Link"
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"' EXIT
 
@@ -25,131 +25,161 @@ dlg() {
 
 result() { cat "$TMPFILE"; }
 
-# ─── target cluster selection ───────────────────────────────────────────────
+# Prompt the user for a Skupper Link YAML file path and validate it.
+# Stores the validated path in the caller's variable named by $1 (nameref).
+select_link_file() {
+    local -n _link_file_ref=$1
 
-pick_target_cluster() {
-    local current="$1"
-    local menu_items=()
-    local cluster_name
+    dlg --inputbox "Enter the path to the Skupper Link YAML file:" 8 60 || { clear; exit 0; }
+    _link_file_ref=$(result)
 
-    for server_file in cluster/*/server.json; do
-        # Extract cluster name: cluster/<name>/server.json
-        cluster_name=$(echo "$server_file" | awk -F'/' '{print $2}')
-        if [[ "$cluster_name" != "$current" ]]; then
-            menu_items+=("$cluster_name" "Target cluster server endpoint")
-        fi
+    [[ -n "$_link_file_ref" ]] || die "No link file path provided."
+    [[ -f "$_link_file_ref" ]] || die "File '$_link_file_ref' does not exist."
+
+    grep -Eq '^\s*kind:\s*Secret' "$_link_file_ref" || die "File '$_link_file_ref' is missing a Secret document."
+    grep -Eq '^\s*kind:\s*Link' "$_link_file_ref" || die "File '$_link_file_ref' is missing a Link document."
+}
+
+# Prompt the user to select one or more target clusters from ./cluster/<dir>/.
+# Stores the selected cluster names in the caller's array variable named by $1 (nameref).
+select_target_clusters() {
+    local -n _clusters_ref=$1
+
+    local -a cluster_dirs
+    mapfile -t cluster_dirs < <(find ./cluster -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+
+    [[ ${#cluster_dirs[@]} -gt 0 ]] || die "No cluster directories found under ./cluster/."
+
+    # Build checklist items: <tag> <description> <status>
+    local -a items=()
+    local dir
+    for dir in "${cluster_dirs[@]}"; do
+        items+=("$dir" "$dir" "off")
     done
 
-    if (( ${#menu_items[@]} == 0 )); then
-        dlg --msgbox "No target cluster server endpoints found in cluster/*/server.json (other than current cluster '${current}')." 8 60
-        return 1
-    fi
+    dlg --checklist "Select target cluster(s) for the link:" 20 60 "${#cluster_dirs[@]}" "${items[@]}" || { clear; exit 0; }
 
-    dlg --title "Select Target Cluster" \
-        --menu "Choose a target cluster to link with '${current}':" 15 65 6 \
-        "${menu_items[@]}" || return 1
+    # dialog outputs space-separated quoted tokens; read them into the array
+    local raw
+    raw=$(result)
+    [[ -n "$raw" ]] || die "No target cluster selected."
 
-    result
+    # eval-safe split: strip surrounding quotes added by dialog and split on whitespace
+    read -ra _clusters_ref <<< "${raw//\"/}"
 }
 
 # ─── main ────────────────────────────────────────────────────────────────────
 
+# Extract the 'edge' endpoint host and port from the Link document in link_file.
+# Stores the results in the caller's variables named by $2 (host) and $3 (port) (namerefs).
+extract_link_endpoint() {
+    local link_file=$1
+    local -n _host_ref=$2
+    local -n _port_ref=$3
+
+    # Use awk to extract the Link document: accumulate each '---'-separated block
+    # and print only the one that contains 'kind: Link'.
+    local link_doc
+    link_doc=$(awk '
+        /^---/ {
+            if (block ~ /kind:[[:space:]]*Link/) { print block }
+            block = ""
+            next
+        }
+        { block = block $0 "\n" }
+        END { if (block ~ /kind:[[:space:]]*Link/) { print block } }
+    ' "$link_file")
+
+    [[ -n "$link_doc" ]] || die "No Link document found in '$link_file'."
+
+    _host_ref=$(printf '%s' "$link_doc" | yq -r '.spec.endpoints[] | select(.name == "edge") | .host')
+    _port_ref=$(printf '%s' "$link_doc" | yq -r '.spec.endpoints[] | select(.name == "edge") | .port')
+
+    [[ -n "$_host_ref" ]] || die "Could not extract edge endpoint host from '$link_file'."
+    [[ -n "$_port_ref" ]] || die "Could not extract edge endpoint port from '$link_file'."
+}
+
 main() {
-    for cmd in dialog kubectl jq; do
+    for cmd in dialog kubectl jq yq; do
         command -v "$cmd" &>/dev/null || die "Required command '$cmd' is not installed."
     done
 
-    local current_cluster
-    current_cluster=$(kubectl config current-context 2>/dev/null) || die "Could not determine current kubectl context."
-    [[ -n "$current_cluster" ]] || die "kubectl current-context is empty."
-
-    local target_cluster
-    target_cluster=$(pick_target_cluster "$current_cluster") || { clear; exit 0; }
-
-    local target_server_file="cluster/${target_cluster}/server.json"
-    [[ -f "$target_server_file" ]] || die "Target server file '${target_server_file}' not found."
+    local link_file
+    select_link_file link_file
 
     local host port
-    host=$(jq -r '.host // empty' "$target_server_file" 2>/dev/null)
-    port=$(jq -r '.port // empty' "$target_server_file" 2>/dev/null)
+    extract_link_endpoint "$link_file" host port
 
-    [[ -n "$host" ]] || die "Failed to extract 'host' from ${target_server_file}."
-    [[ -n "$port" ]] || die "Failed to extract 'port' from ${target_server_file}."
+    local -a target_clusters
+    select_target_clusters target_clusters
 
-    local target_client_secret_file="cluster/${target_cluster}/client-secret.yaml"
-    [[ -f "$target_client_secret_file" ]] || die "Target client secret file '${target_client_secret_file}' not found."
+    # For each selected cluster, extract the Secret document from the link file
+    # and write it to cluster/<name>/<router-namespace>/kube/secret_client-uplink.yaml
+    local cluster ns namespace_file base_cluster_dir connector_dir ssl_profile_dir kube_dir secret_out
+    declare -a generated_files
+    for cluster in "${target_clusters[@]}"; do
+        namespace_file="cluster/${cluster}/namespace"
+        [[ -f "$namespace_file" ]] || die "Namespace file not found for cluster '${cluster}': ${namespace_file}"
 
-    # Paths for new resources
-    local base_cluster_dir="cluster/${current_cluster}/skupper"
-    local connector_dir="${base_cluster_dir}/router/connector"
-    local ssl_profile_dir="${base_cluster_dir}/router/sslProfile"
-    local kube_dir="${base_cluster_dir}/kube"
+        ns=$(tr -d '[:space:]' < "$namespace_file")
+        [[ -n "$ns" ]] || die "Namespace file is empty for cluster '${cluster}': ${namespace_file}"
 
-    mkdir -p "${connector_dir}" "${ssl_profile_dir}" "${kube_dir}" 2>/dev/null || true
+        base_cluster_dir="cluster/${cluster}/${ns}"
+        connector_dir="${base_cluster_dir}/router/connector"
+        ssl_profile_dir="${base_cluster_dir}/router/sslProfile"
+        kube_dir="${base_cluster_dir}/kube"
+        mkdir -p "${connector_dir}" "${ssl_profile_dir}" "${kube_dir}" || true
 
-    local connector_file="${connector_dir}/${target_cluster}.json"
-    local ssl_profile_file="${ssl_profile_dir}/client-${target_cluster}.json"
-    local kube_secret_file="${kube_dir}/secret_client-${target_cluster}.yaml"
+        secret_out="${kube_dir}/secret_client-uplink.yaml"
 
-    # 1. Generate connector JSON
-    cat <<EOF > "${connector_file}"
+        # Extract the Secret document from the multi-document link file.
+        yq -y 'select(.kind == "Secret") | .metadata.name = "client-uplink"' "$link_file" > "$secret_out" \
+            || die "Failed to write secret for cluster '${cluster}' to '${secret_out}'."
+
+        generated_files+=(${secret_out})
+        local connector_file="${connector_dir}/uplink.json"
+        local ssl_profile_file="${ssl_profile_dir}/client-uplink.json"
+        generated_files+=(${connector_file})
+        generated_files+=(${ssl_profile_file})
+
+        # Generate connector JSON
+        cat <<EOF > "${connector_file}"
 {
-  "name": "link/${target_cluster}",
+  "name": "link/uplink",
   "host": "${host}",
   "port": ${port},
-  "role": "inter-edge",
-  "sslProfile": "client-${target_cluster}"
+  "role": "edge",
+  "sslProfile": "client-uplink"
 }
 EOF
 
-    # 2. Generate sslProfile JSON
-    cat <<EOF > "${ssl_profile_file}"
+        # Generate sslProfile JSON
+        cat <<EOF > "${ssl_profile_file}"
 {
-  "name": "client-${target_cluster}",
-  "certFile": "/etc/skupper-router-certs/client-${target_cluster}/tls.crt",
-  "privateKeyFile": "/etc/skupper-router-certs/client-${target_cluster}/tls.key",
-  "caCertFile": "/etc/skupper-router-certs/client-${target_cluster}/ca.crt"
+  "name": "client-uplink",
+  "certFile": "/etc/skupper-router-certs/client-uplink/tls.crt",
+  "privateKeyFile": "/etc/skupper-router-certs/client-uplink/tls.key",
+  "caCertFile": "/etc/skupper-router-certs/client-uplink/ca.crt"
 }
 EOF
 
-    # 3. Generate kube client secret manifest
-    local b64_ca b64_tls_crt b64_tls_key
-    # Extract ca.crt, tls.crt, tls.key from target client-secret.yaml
-    b64_ca=$(grep -E '^\s*ca\.crt:' "$target_client_secret_file" | awk '{print $2}' | tr -d '\r\n')
-    b64_tls_crt=$(grep -E '^\s*tls\.crt:' "$target_client_secret_file" | awk '{print $2}' | tr -d '\r\n')
-    b64_tls_key=$(grep -E '^\s*tls\.key:' "$target_client_secret_file" | awk '{print $2}' | tr -d '\r\n')
-
-    [[ -n "$b64_ca" ]] || die "Could not find ca.crt in ${target_client_secret_file}."
-    [[ -n "$b64_tls_crt" ]] || die "Could not find tls.crt in ${target_client_secret_file}."
-    [[ -n "$b64_tls_key" ]] || die "Could not find tls.key in ${target_client_secret_file}."
-
-    cat <<EOF > "${kube_secret_file}"
-apiVersion: v1
-kind: Secret
-metadata:
-  name: client-${target_cluster}
-type: kubernetes.io/tls
-data:
-  ca.crt: ${b64_ca}
-  tls.crt: ${b64_tls_crt}
-  tls.key: ${b64_tls_key}
-EOF
+    done
 
     clear
     echo "────────────────────────────────────────────────────────────"
     echo " Inter-Cluster Link Configuration Created"
     echo "────────────────────────────────────────────────────────────"
-    echo " Current Cluster : ${current_cluster}"
-    echo " Target Cluster  : ${target_cluster}"
-    echo " Host            : ${host}"
-    echo " Port            : ${port}"
+    echo " Target Clusters : ${target_clusters[@]}"
+    echo " Link to Host    : ${host}:${port}"
     echo "────────────────────────────────────────────────────────────"
     echo " Generated Files:"
-    echo "  - ${connector_file}"
-    echo "  - ${ssl_profile_file}"
-    echo "  - ${kube_secret_file}"
+    for f in ${generated_files[@]}; do
+        echo "  - ${f}"
+    done
     echo "────────────────────────────────────────────────────────────"
     echo ""
+
+    echo "Please run sync-conf.sh to apply changes (for each of the target clusters)"
 }
 
 main "$@"

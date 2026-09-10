@@ -13,6 +13,24 @@ die() {
     exit 1
 }
 
+resolve_router_ns() {
+    local namespaces
+    mapfile -t namespaces < <(kubectl get daemonsets --all-namespaces --no-headers \
+        --field-selector metadata.name=skupper-router-v3 \
+        -o custom-columns=":metadata.namespace" 2>/dev/null)
+    case "${#namespaces[@]}" in
+        0) die "No skupper-router-v3 DaemonSet found in any namespace." ;;
+        1) echo "${namespaces[0]}" ;;
+        *)
+            echo "Multiple namespaces contain skupper-router-v3. Pick one:" >&2
+            select ns in "${namespaces[@]}"; do
+                [[ -n "$ns" ]] && { echo "$ns"; return; }
+                echo "Invalid selection; try again." >&2
+            done
+            ;;
+    esac
+}
+
 # ─── resolve cluster ─────────────────────────────────────────────────────────
 
 cluster=$(kubectl config current-context) || die "could not determine current kubectl context"
@@ -20,6 +38,8 @@ cluster=$(kubectl config current-context) || die "could not determine current ku
 
 cluster_dir="cluster/${cluster}"
 [[ -d "$cluster_dir" ]] || die "cluster directory '${cluster_dir}' does not exist"
+
+ROUTER_NS=$(resolve_router_ns)
 
 # ─── cleanup ─────────────────────────────────────────────────────────────────
 
@@ -40,30 +60,30 @@ done
 
 echo "==> Patching skupper-router-v3 DaemonSet secret mounts for cluster '${cluster}'"
 
-for secret_file in "${cluster_dir}/skupper/kube"/secret_client-*.yaml; do
+for secret_file in "${cluster_dir}/${ROUTER_NS}/kube"/secret_client-*.yaml; do
     secret_name=$(grep -m1 '^\s*name:' "${secret_file}" | awk '{print $2}')
     [[ -z "$secret_name" ]] && continue
     mount_path="/etc/skupper-router-certs/${secret_name}"
     echo "  mounting secret '${secret_name}' at ${mount_path}"
-    kubectl -n skupper patch daemonset skupper-router-v3 --type=json -p \
+    kubectl -n "$ROUTER_NS" patch daemonset skupper-router-v3 --type=json -p \
         "[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/volumeMounts/-\",\"value\":{\"name\":\"${secret_name}\",\"mountPath\":\"${mount_path}\"}},{\"op\":\"add\",\"path\":\"/spec/template/spec/volumes/-\",\"value\":{\"name\":\"${secret_name}\",\"secret\":{\"secretName\":\"${secret_name}\"}}}]" || true
 done
 
 echo "  waiting for skupper-router-v3 rollout to complete..."
-kubectl -n skupper rollout status daemonset/skupper-router-v3
+kubectl -n "$ROUTER_NS" rollout status daemonset/skupper-router-v3
 
 # ─── router entity apply ─────────────────────────────────────────────────────
 
 echo "==> Applying router entities for cluster '${cluster}'"
 
-for json_file in "${cluster_dir}/skupper/router/sslProfile"/*.json; do
+for json_file in "${cluster_dir}/${ROUTER_NS}/router/sslProfile"/*.json; do
     echo "  skmanage create sslProfile < ${json_file}"
-    cat "${json_file}" | kubectl -n skupper exec -i daemonset/skupper-router-v3 -- skmanage create --type sslProfile --stdin
+    cat "${json_file}" | kubectl -n "$ROUTER_NS" exec -i daemonset/skupper-router-v3 -- skmanage create --type sslProfile --stdin
 done
 
-for json_file in "${cluster_dir}/skupper/router/connector"/*.json; do
+for json_file in "${cluster_dir}/${ROUTER_NS}/router/connector"/*.json; do
     echo "  skmanage create connector < ${json_file}"
-    cat "${json_file}" | kubectl -n skupper exec -i daemonset/skupper-router-v3 -- skmanage create --type connector --stdin
+    cat "${json_file}" | kubectl -n "$ROUTER_NS" exec -i daemonset/skupper-router-v3 -- skmanage create --type connector --stdin
 done
 
 for json_file in "${cluster_dir}"/*/router/*/*.json; do
@@ -71,7 +91,7 @@ for json_file in "${cluster_dir}"/*/router/*/*.json; do
     entity_type=$(echo "$json_file" | awk -F'/' '{print $5}')
     [[ "$entity_type" == "sslProfile" || "$entity_type" == "connector" ]] && continue
     echo "  skmanage create ${entity_type} < ${json_file}"
-    cat "${json_file}" | kubectl -n skupper exec -i daemonset/skupper-router-v3 -- skmanage create --type "${entity_type}" --stdin
+    cat "${json_file}" | kubectl -n "$ROUTER_NS" exec -i daemonset/skupper-router-v3 -- skmanage create --type "${entity_type}" --stdin
 done
 
 echo "==> Done"

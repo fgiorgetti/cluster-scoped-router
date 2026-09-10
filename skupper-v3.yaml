@@ -32,6 +32,19 @@ subjects:
 - kind: ServiceAccount
   name: skupper-router
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: skupper-router-mesh
+spec:
+  clusterIP: None
+  selector:
+    app: skupper-router
+  ports:
+    - name: mesh-port
+      port: 45671
+      targetPort: 45671
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -58,6 +71,10 @@ spec:
           value: json
         - name: SKUPPER_SITE_ID
           value: ___UUID___
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         livenessProbe:
           failureThreshold: 3
           httpGet:
@@ -138,12 +155,6 @@ data:
                 "mode": "edge",
                 "helloMaxAgeSeconds": "3",
                 "metadata": "{\"id\":\"___UUID___\",\"version\":\"v3\",\"platform\":\"kubernetes\"}"
-            }
-        ],
-        [
-            "network",
-            {
-                "networkId": "___VAN_ID___"
             }
         ],
         [

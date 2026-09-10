@@ -23,6 +23,39 @@ dlg() {
 
 result() { cat "$TMPFILE"; }
 
+# ─── resolve router namespace ────────────────────────────────────────────────
+
+resolve_router_ns() {
+    local -a ns_list=()
+
+    while IFS= read -r ns; do
+        [[ -n "$ns" ]] && ns_list+=("$ns")
+    done < <(
+        kubectl get daemonsets --all-namespaces --no-headers \
+            --field-selector metadata.name=skupper-router-v3 \
+            -o custom-columns=":metadata.namespace" 2>/dev/null
+    )
+
+    case "${#ns_list[@]}" in
+        0)
+            die "No skupper-router-v3 DaemonSet found in any namespace."
+            ;;
+        1)
+            echo "${ns_list[0]}"
+            ;;
+        *)
+            local -a menu_args=()
+            for ns in "${ns_list[@]}"; do
+                menu_args+=("$ns" "")
+            done
+            dlg --title "Router Namespace" \
+                --menu "Multiple skupper-router-v3 DaemonSets found. Select a namespace:" \
+                20 60 15 "${menu_args[@]}" || return 1
+            result
+            ;;
+    esac
+}
+
 # ─── auto-assign listener port ───────────────────────────────────────────────
 
 next_connector_listener_port() {
@@ -33,7 +66,7 @@ next_connector_listener_port() {
     while IFS= read -r p; do
         [[ -n "$p" ]] && used["$p"]=1
     done < <(
-        grep -roh '"port": *"[^"]*"' "cluster/${cluster}/skupper/router/tcpListener/*.json" 2>/dev/null \
+        grep -roh '"port": *"[^"]*"' "cluster/${cluster}/${ROUTER_NS}/router/tcpListener/*.json" 2>/dev/null \
             | sed 's/.*"port": *"\([^"]*\)"/\1/'
     )
 
@@ -54,7 +87,7 @@ pick_routing_key() {
     while IFS= read -r key; do
         [[ -n "$key" ]] && keys+=("$key" "")
     done < <(
-        kubectl -n skupper exec daemonsets/skupper-router-v3 -- \
+        kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- \
             skstat -a 2>/dev/null | grep ' mobile ' \
             | grep -v -E '(\.|/|\$)' | awk '{print $2}'
     )
@@ -145,7 +178,7 @@ pick_service() {
 get_routing_key_port() {
     local cluster="$1"
     local routing_key="$2"
-    local listener_file="cluster/${cluster}/skupper/router/tcpListener/${routing_key}.json"
+    local listener_file="cluster/${cluster}/${ROUTER_NS}/router/tcpListener/${routing_key}.json"
 
     if [[ ! -f "$listener_file" ]]; then
         die "Listener file '$listener_file' not found for routing key '$routing_key'."
@@ -167,7 +200,7 @@ ensure_skupper_listener() {
     local cluster="$1"
     local routing_key="$2"
 
-    local skupper_base="cluster/${cluster}/skupper"
+    local skupper_base="cluster/${cluster}/${ROUTER_NS}"
     local listener_dir="${skupper_base}/router/tcpListener"
     local listener_file="${listener_dir}/${routing_key}.json"
 
@@ -201,7 +234,7 @@ write_network_policy() {
     local svc_name="$3"
     local target_port="$4"
 
-    local skupper_kube_dir="cluster/${cluster}/skupper/kube"
+    local skupper_kube_dir="cluster/${cluster}/${ROUTER_NS}/kube"
     mkdir -p "$skupper_kube_dir"
 
     local np_file="${skupper_kube_dir}/networkpolicy_skupper-router-${namespace}-${svc_name}.yaml"
@@ -211,7 +244,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: skupper-router-${namespace}-${svc_name}
-  namespace: skupper
+  namespace: ${ROUTER_NS}
 spec:
   podSelector:
     matchLabels:
@@ -234,15 +267,16 @@ EOF
 # ─── return the pod name, ip and ready condition for all router pods ─────────
 
 pick_router_endpoints() {
-    kubectl -n skupper get pod -l app=skupper-router -o json | \
+    kubectl -n "$ROUTER_NS" get pod -l app=skupper-router -o json | \
         jq -r '.items[] | .metadata.namespace + " " + .metadata.name + " " + (.status | .podIP + " " + (.conditions[] | select(.type == "Ready") | .status))'
 }
 
 # ─── main ────────────────────────────────────────────────────────────────────
 
 main() {
-    local routing_key namespace svc_name svc_port target_port cluster
+    local routing_key namespace svc_name svc_port target_port cluster ROUTER_NS
 
+    ROUTER_NS=$(resolve_router_ns)  || { clear; exit 0; }
     routing_key=$(pick_routing_key) || { clear; exit 0; }
     namespace=$(pick_namespace)     || { clear; exit 0; }
 
@@ -335,12 +369,15 @@ EOF
     echo " Files written:"
     echo "  $service_file"
     echo "  $endpointslice_file"
-    echo "  cluster/${cluster}/skupper/kube/networkpolicy_skupper-router-${namespace}-${svc_name}.yaml"
+    echo "  cluster/${cluster}/${ROUTER_NS}/kube/networkpolicy_skupper-router-${namespace}-${svc_name}.yaml"
     echo "──────────────────────────────────────"
     echo ""
     echo " Skupper files (created if missing above):"
-    echo "  cluster/${cluster}/skupper/router/tcpListener/${routing_key}.json"
+    echo "  cluster/${cluster}/${ROUTER_NS}/router/tcpListener/${routing_key}.json"
     echo "──────────────────────────────────────"
+    echo ""
+    echo "Please run sync-conf.sh to apply changes"
+
 }
 
 main "$@"

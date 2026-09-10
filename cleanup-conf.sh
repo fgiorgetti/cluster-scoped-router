@@ -11,10 +11,30 @@ die() {
     exit 1
 }
 
+resolve_router_ns() {
+    local namespaces
+    mapfile -t namespaces < <(kubectl get daemonsets --all-namespaces --no-headers \
+        --field-selector metadata.name=skupper-router-v3 \
+        -o custom-columns=":metadata.namespace" 2>/dev/null)
+    case "${#namespaces[@]}" in
+        0) die "No skupper-router-v3 DaemonSet found in any namespace." ;;
+        1) echo "${namespaces[0]}" ;;
+        *)
+            echo "Multiple namespaces contain skupper-router-v3. Pick one:" >&2
+            select ns in "${namespaces[@]}"; do
+                [[ -n "$ns" ]] && { echo "$ns"; return; }
+                echo "Invalid selection; try again." >&2
+            done
+            ;;
+    esac
+}
+
 # ─── resolve cluster ─────────────────────────────────────────────────────────
 
 cluster=$(kubectl config current-context) || die "could not determine current kubectl context"
 [[ -n "$cluster" ]] || die "kubectl current-context is empty"
+
+ROUTER_NS=$(resolve_router_ns)
 
 # ─── cleanup ─────────────────────────────────────────────────────────────────
 
@@ -30,34 +50,34 @@ echo "  Deleting existing tcpListener entities"
 while IFS= read -r name; do
     [[ -z "$name" ]] && continue
     echo "    skmanage delete --type tcpListener --name ${name}"
-    kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage delete --type tcpListener --name "${name}" || true
-done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type tcpListener 2>/dev/null | jq -r '.[].name' 2>/dev/null || true)
+    kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- skmanage delete --type tcpListener --name "${name}" || true
+done < <(kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- skmanage query --type tcpListener 2>/dev/null | jq -r '.[].name' 2>/dev/null || true)
 
 echo "  Deleting existing tcpConnector entities"
 while IFS= read -r name; do
     [[ -z "$name" ]] && continue
     echo "    skmanage delete --type tcpConnector --name ${name}"
-    kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage delete --type tcpConnector --name "${name}" || true
-done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type tcpConnector 2>/dev/null | jq -r '.[].name' 2>/dev/null || true)
+    kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- skmanage delete --type tcpConnector --name "${name}" || true
+done < <(kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- skmanage query --type tcpConnector 2>/dev/null | jq -r '.[].name' 2>/dev/null || true)
 
-echo "  Deleting existing connector entities (role=inter-edge)"
+echo "  Deleting existing connector entities (role=edge)"
 # Collect sslProfiles referenced by connectors before deletion
 ssl_profiles=()
 while IFS= read -r profile; do
     [[ -z "$profile" ]] && continue
     ssl_profiles+=("$profile")
-done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="inter-edge") | .sslProfile // empty' 2>/dev/null || true)
+done < <(kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="edge") | .sslProfile // empty' 2>/dev/null || true)
 
 while IFS= read -r name; do
     [[ -z "$name" ]] && continue
     echo "    skmanage delete --type connector --name ${name}"
-    kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage delete --type connector --name "${name}" || true
-done < <(kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="inter-edge") | .name' 2>/dev/null || true)
+    kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- skmanage delete --type connector --name "${name}" || true
+done < <(kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="edge") | .name' 2>/dev/null || true)
 
 echo "  Deleting sslProfiles used by deleted connectors"
 for profile in "${ssl_profiles[@]}"; do
     echo "    skmanage delete --type sslProfile --name ${profile}"
-    kubectl -n skupper exec daemonsets/skupper-router-v3 -- skmanage delete --type sslProfile --name "${profile}" || true
+    kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- skmanage delete --type sslProfile --name "${profile}" || true
 done
 
 echo "==> Cleanup done"
