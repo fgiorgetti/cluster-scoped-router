@@ -271,8 +271,6 @@ main() {
 
     apply_network_policy
 
-    create_ssl_profile
-
     full_mesh
 
     echo "${NAMESPACE}" > "cluster/${cluster}/namespace"
