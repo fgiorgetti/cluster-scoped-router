@@ -306,7 +306,8 @@ main() {
     # Build the endpoints YAML block from router_endpoints
     local addresses_yaml="  - addresses:"
     while IFS=' ' read -r ep_ip; do
-        addresses_yaml+="    - \"${ep_ip}\"\n"
+        addresses_yaml+="    - \"${ep_ip}\"
+"
     done <<< "$router_endpoints"
 
     # Write Kubernetes EndpointSlice YAML
