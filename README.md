@@ -51,22 +51,25 @@ intra-cluster TLS.
 **What it does**
 
 1. Prompts for a namespace; aborts if it already exists, otherwise creates it.
-2. Generates a self-signed CA, server certificate, and client certificate with
-   `openssl` using `*.skupper-router-mesh` as the TLS hostname.
+2. Generates a self-signed CA and server certificate with `openssl` using
+   `*.skupper-router-mesh` as the TLS hostname.
 3. Applies the server TLS secret to the chosen namespace.
-4. Substitutes site name and UUID into `skupper-multi-tenant.yaml` and applies it.
+4. Substitutes site name and UUID into `skupper-multi-tenant.yaml` and applies
+   it, then waits for the `skupper-router-multi-tenant` DaemonSet rollout to
+   complete.
 5. Applies a default-deny `NetworkPolicy` (`skupper-router-default-deny`) to
    the namespace. It allows ingress only from within the namespace itself and
    from any IP on the inter-edge port (45671).
-6. Writes the chosen namespace name to `cluster/<context>/namespace`.
+6. Builds a full inter-edge mesh between all router pods: for each pod it
+   deletes any existing `role=inter-edge` connectors and recreates them toward
+   every other pod via `*.skupper-router-mesh` hostnames.
+7. Writes the chosen namespace name to `cluster/<context>/namespace`.
 
 **Generated files**
 
 ```
 cluster/<context>/
 ├── server-secret.yaml   # server TLS secret (applied to the cluster)
-├── client-secret.yaml   # client TLS secret (shared with other clusters via link.sh)
-├── server.json          # inter-edge host and port
 └── namespace            # the namespace chosen during installation
 ```
 
@@ -197,10 +200,11 @@ prompt is shown.
 1. Calls `cleanup-conf.sh` to remove all previously applied router entities and
    labeled Kubernetes resources.
 2. Applies every `cluster/<context>/*/kube/*.yaml` manifest with `kubectl`.
-3. Patches the `skupper-router-multi-tenant` DaemonSet to mount any new client-certificate
-   Secrets and waits for the rollout to complete.
-4. Applies SSL profiles, inter-edge connectors, and all other router entities
-   (tcpConnector, tcpListener, …) via `skmanage`.
+3. Patches the `skupper-router-multi-tenant` DaemonSet to mount any new
+   client-certificate Secrets and waits for the rollout to complete.
+4. Applies SSL profiles and inter-edge connectors to every router pod
+   individually via `skmanage`, then applies all remaining router entities
+   (tcpConnector, tcpListener, …) to every pod.
 
 **No interactive prompts** (beyond the namespace selection if multiple router
 namespaces are found). Uses the current `kubectl` context.
