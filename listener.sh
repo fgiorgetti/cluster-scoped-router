@@ -328,12 +328,12 @@ ports:
     port: ${target_port}
 endpoints:
 ${addresses_yaml}
-  conditions:
-    ready: true
-  targetRef:
-    kind: DaemonSet
-    name: skupper-router-multi-tenant
-    namespace: ${ROUTER_NS}
+    conditions:
+      ready: true
+    targetRef:
+      kind: DaemonSet
+      name: skupper-router-multi-tenant
+      namespace: ${ROUTER_NS}
 EOF
 
     # Write Kubernetes Service YAML
