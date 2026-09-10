@@ -306,7 +306,7 @@ main() {
     # Build the endpoints YAML block from router_endpoints
     local addresses_yaml="  - addresses:"
     while IFS=' ' read -r ep_ip; do
-        addresses_yaml+="    - \"${ep_ip}\""
+        addresses_yaml+="    - \"${ep_ip}\"\n"
     done <<< "$router_endpoints"
 
     # Write Kubernetes EndpointSlice YAML
@@ -331,8 +331,7 @@ ${addresses_yaml}
   targetRef:
     kind: DaemonSet
     name: skupper-router-multi-tenant
-    namespace: ${ROUTER_NS}"
-
+    namespace: ${ROUTER_NS}
 EOF
 
     # Write Kubernetes Service YAML
