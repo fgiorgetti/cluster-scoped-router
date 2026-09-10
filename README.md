@@ -17,9 +17,9 @@ to the live cluster by `sync-conf.sh`.
 |---|---|
 | `dialog` | `install-site.sh`, `link.sh`, `connector.sh`, `listener.sh` |
 | `kubectl` | all scripts |
-| `jq` | `link.sh`, `listener.sh`, `cleanup-conf.sh` |
+| `jq` | `cleanup-conf.sh`, `listener.sh` |
+| `yq` | `link.sh` |
 | `openssl` | `install-site.sh` |
-| `sed`, `awk` | `install-site.sh`, `listener.sh` |
 
 ### Repository file
 
@@ -38,31 +38,27 @@ The context name is also used as the directory name under `cluster/`.
 
 ### `install-site.sh`
 
-Installs the skupper-router into the `skupper` namespace as a DaemonSet and
-sets up inter-cluster ingress and TLS.
+Installs the skupper-router into a chosen namespace as a DaemonSet and sets up
+intra-cluster TLS.
 
 **Interactive prompts**
 
 | Prompt | Description |
 |---|---|
+| Namespace | Namespace to install into (default: `skupper-multi-tenant`); must not already exist |
 | Site Name | Arbitrary label for this site |
-| VAN ID | Identifier shared across all clusters in the same VAN |
 
 **What it does**
 
-1. Creates the `skupper` namespace if it does not exist.
-2. Detects the cluster type:
-   - **OpenShift** — creates a `ClusterIP` service and a TLS-passthrough `Route`.
-   - **Kubernetes** — creates a `LoadBalancer` service; falls back to a node IP
-     if the load balancer remains pending.
-3. Generates a self-signed CA, server certificate, and client certificate with
-   `openssl`.
-4. Applies the server secret to the `skupper` namespace.
-5. Substitutes site name, UUID, and VAN ID into `skupper-multi-tenant.yaml` and applies
-   it.
-6. Applies a default-deny `NetworkPolicy` (`skupper-router-default-deny`) to
-   the `skupper` namespace. It allows ingress only from within the namespace
-   itself and from any IP on the inter-edge port (45671).
+1. Prompts for a namespace; aborts if it already exists, otherwise creates it.
+2. Generates a self-signed CA, server certificate, and client certificate with
+   `openssl` using `*.skupper-router-mesh` as the TLS hostname.
+3. Applies the server TLS secret to the chosen namespace.
+4. Substitutes site name and UUID into `skupper-multi-tenant.yaml` and applies it.
+5. Applies a default-deny `NetworkPolicy` (`skupper-router-default-deny`) to
+   the namespace. It allows ingress only from within the namespace itself and
+   from any IP on the inter-edge port (45671).
+6. Writes the chosen namespace name to `cluster/<context>/namespace`.
 
 **Generated files**
 
@@ -70,38 +66,50 @@ sets up inter-cluster ingress and TLS.
 cluster/<context>/
 ├── server-secret.yaml   # server TLS secret (applied to the cluster)
 ├── client-secret.yaml   # client TLS secret (shared with other clusters via link.sh)
-└── server.json          # inter-edge host and port (read by link.sh on other clusters)
+├── server.json          # inter-edge host and port
+└── namespace            # the namespace chosen during installation
 ```
 
 ---
 
 ### `link.sh`
 
-Links the current cluster to another cluster by reading that cluster's
-`server.json` and `client-secret.yaml` and writing the corresponding connector
-and SSL profile configuration locally.
+Links one or more local clusters to a backbone cluster by reading a Skupper
+Link YAML file (exported from the backbone) and writing the corresponding
+connector and SSL profile configuration under each target cluster's directory.
 
-**Requires** that `install-site.sh` has been run on both clusters so that
-`cluster/<target>/server.json` and `cluster/<target>/client-secret.yaml` exist.
+**Requires**
+- A Skupper Link YAML file (multi-document containing a `Secret` and a `Link`
+  resource) exported from the backbone cluster.
+- `install-site.sh` must have been run on every target cluster so that
+  `cluster/<target>/namespace` exists.
 
 **Interactive prompts**
 
 | Prompt | Description |
 |---|---|
-| Target cluster | Selected from the list of available `cluster/*/server.json` entries (current cluster excluded) |
+| Link YAML path | Path to the multi-document Skupper Link YAML file |
+| Target cluster(s) | Checklist of available `cluster/*/` directories to link |
 
-**Generated files**
+**What it does**
+
+1. Reads the `Link` document to extract the `edge` endpoint host and port using
+   `yq`.
+2. For each selected target cluster, reads its `cluster/<target>/namespace` file
+   to determine the router namespace.
+3. Writes an `uplink` connector JSON, an SSL profile JSON, and the client secret
+   YAML under each target cluster's directory.
+
+**Generated files** (per selected target cluster)
 
 ```
-cluster/<current>/skupper/router/
-├── connector/<target>.json          # inter-edge connector to the target cluster
-└── sslProfile/client-<target>.json  # SSL profile referencing the client certificate
-
-cluster/<current>/skupper/kube/
-└── secret_client-<target>.yaml      # Kubernetes Secret with the client certificate
+cluster/<target>/<router-ns>/
+├── router/connector/uplink.json          # inter-edge connector to the backbone
+├── router/sslProfile/client-uplink.json  # SSL profile referencing the client cert
+└── kube/secret_client-uplink.yaml        # Kubernetes Secret with the client cert
 ```
 
-Run `sync-conf.sh` afterwards to apply these files to the live cluster.
+Run `sync-conf.sh` on each target cluster afterwards to apply these files.
 
 ---
 
@@ -139,12 +147,16 @@ Detects routing keys available in the VAN and creates a Kubernetes Service and
 EndpointSlice on the current cluster so that workloads can consume the remote
 service.
 
-**Requires** that the router is running (queries it live via `skstat`).
+**Requires** that the router is running (queries it live via `skstat`). The
+router namespace is auto-detected by scanning all namespaces for a
+`skupper-router-v3` DaemonSet; if multiple are found, a selection menu is
+presented.
 
 **Interactive prompts**
 
 | Prompt | Description |
 |---|---|
+| Router namespace | Shown only when multiple `skupper-router-v3` DaemonSets are found |
 | Routing key | Selected from live router data or entered manually |
 | Namespace | Namespace that will receive the new Service |
 | Service name | Name for the Kubernetes Service |
@@ -153,16 +165,16 @@ service.
 **Generated files**
 
 ```
-cluster/<context>/skupper/router/tcpListener/<routing-key>.json
+cluster/<context>/<router-ns>/router/tcpListener/<routing-key>.json
 cluster/<context>/<namespace>/kube/service_<service>.yaml
 cluster/<context>/<namespace>/kube/endpointslice_<service>.yaml
-cluster/<context>/skupper/kube/networkpolicy_skupper-router-<namespace>-<service>.yaml
+cluster/<context>/<router-ns>/kube/networkpolicy_skupper-router-<namespace>-<service>.yaml
 ```
 
 The listener port is allocated automatically starting from 1024, reusing an
 existing file if one already exists for the routing key.
 
-A per-listener `NetworkPolicy` is also generated in the `skupper` namespace. It
+A per-listener `NetworkPolicy` is also generated in the router namespace. It
 allows ingress to the router pods from the consuming namespace on the allocated
 listener port only.
 
@@ -176,6 +188,10 @@ router.
 Applies all configuration generated by `link.sh`, `connector.sh`, and
 `listener.sh` to the live cluster and router.
 
+The router namespace is auto-detected by scanning all namespaces for a
+`skupper-router-v3` DaemonSet; if multiple are found, a plain terminal `select`
+prompt is shown.
+
 **What it does (in order)**
 
 1. Calls `cleanup-conf.sh` to remove all previously applied router entities and
@@ -186,7 +202,8 @@ Applies all configuration generated by `link.sh`, `connector.sh`, and
 4. Applies SSL profiles, inter-edge connectors, and all other router entities
    (tcpConnector, tcpListener, …) via `skmanage`.
 
-**No interactive prompts.** Uses the current `kubectl` context.
+**No interactive prompts** (beyond the namespace selection if multiple router
+namespaces are found). Uses the current `kubectl` context.
 
 > **Note:** `sync-conf.sh` performs a full re-apply on every run — it always
 > cleans up first and then reapplies from the files under `cluster/<context>/`.
@@ -200,6 +217,10 @@ Removes all previously applied consumed-service resources and router entities
 from the live cluster. Called automatically by `sync-conf.sh`, but can also be
 run standalone.
 
+The router namespace is auto-detected by scanning all namespaces for a
+`skupper-router-v3` DaemonSet; if multiple are found, a plain terminal `select`
+prompt is shown.
+
 **What it deletes**
 
 | Resource | Selector |
@@ -208,12 +229,13 @@ run standalone.
 | Kubernetes EndpointSlices (all namespaces) | `skupper.io/type=endpointslice` |
 | Router `tcpListener` entities | all |
 | Router `tcpConnector` entities | all |
-| Router inter-edge `connector` entities | all |
+| Router inter-edge `connector` entities | those with `role=edge` |
 | Router `sslProfile` entities | those referenced by the deleted connectors |
 
-**No interactive prompts.** Uses the current `kubectl` context.
+**No interactive prompts** (beyond the namespace selection if multiple router
+namespaces are found). Uses the current `kubectl` context.
 
-> **Note:** `cleanup-conf.sh` does **not** delete the `skupper` namespace, the
+> **Note:** `cleanup-conf.sh` does **not** delete the router namespace, the
 > router DaemonSet, or the `cluster/` directory. Only live applied resources are
 > removed.
 
@@ -222,12 +244,12 @@ run standalone.
 ## Typical end-to-end workflow
 
 Run the following steps in order. Steps 1 and 2 must be completed on **every
-cluster** in the VAN. Steps 3–5 are per-cluster and per-workload.
+tenant cluster** in the VAN. Steps 3–5 are per-cluster and per-workload.
 
 ```
 1. install-site.sh   — on each cluster: deploy the router and generate certs
-2. link.sh           — on each cluster: generate connector config toward every
-                       other cluster in the VAN (repeat for each peer)
+2. link.sh           — on each cluster: generate connector config toward the
+                       backbone (provide the backbone's exported Link YAML)
 3. connector.sh      — on the cluster that exposes a workload
 4. listener.sh       — on the cluster that consumes the workload
 5. sync-conf.sh      — on each cluster: apply all generated config to the
@@ -241,7 +263,7 @@ cluster** in the VAN. Steps 3–5 are per-cluster and per-workload.
 To tear down a site completely and remove all generated configuration:
 
 ```bash
-kubectl delete ns skupper
+kubectl delete ns <router-namespace>
 rm -rf cluster/
 ```
 
