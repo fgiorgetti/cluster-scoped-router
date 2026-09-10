@@ -85,8 +85,7 @@ is_openshift() {
 
 generate_certificates_and_secrets() {
     local host="$1"
-    local port="$2"
-    local cluster="$3"
+    local cluster="$2"
 
     command -v openssl &>/dev/null || die "openssl is required to generate TLS certificates."
 
@@ -126,30 +125,12 @@ generate_certificates_and_secrets() {
         -extfile "${CERT_TMPDIR}/san.cnf" &>/dev/null \
         || die "Failed to sign server certificate."
 
-    # 3. Generate Client Certificate
-    openssl req -new -newkey rsa:2048 -nodes \
-        -keyout "${CERT_TMPDIR}/client.key" \
-        -out "${CERT_TMPDIR}/client.csr" \
-        -subj "/CN=skupper-router-client" &>/dev/null \
-        || die "Failed to generate client certificate CSR."
-
-    openssl x509 -req -in "${CERT_TMPDIR}/client.csr" \
-        -CA "${CERT_TMPDIR}/ca.crt" \
-        -CAkey "${CERT_TMPDIR}/ca.key" \
-        -CAcreateserial \
-        -out "${CERT_TMPDIR}/client.crt" \
-        -days 3650 &>/dev/null \
-        || die "Failed to sign client certificate."
-
     # Encode components in base64 without wrapping lines
     local b64_ca b64_server_crt b64_server_key b64_client_crt b64_client_key
     b64_ca=$(base64 < "${CERT_TMPDIR}/ca.crt" | tr -d '\r\n')
     b64_server_crt=$(base64 < "${CERT_TMPDIR}/tls.crt" | tr -d '\r\n')
     b64_server_key=$(base64 < "${CERT_TMPDIR}/tls.key" | tr -d '\r\n')
-    b64_client_crt=$(base64 < "${CERT_TMPDIR}/client.crt" | tr -d '\r\n')
-    b64_client_key=$(base64 < "${CERT_TMPDIR}/client.key" | tr -d '\r\n')
 
-    # 4. Generate cluster/<name>/server-secret.yaml
     cat <<EOF > "${out_dir}/server-secret.yaml"
 apiVersion: v1
 kind: Secret
@@ -161,27 +142,6 @@ data:
   ca.crt: ${b64_ca}
   tls.crt: ${b64_server_crt}
   tls.key: ${b64_server_key}
-EOF
-
-    # 5. Generate cluster/<name>/client-secret.yaml
-    cat <<EOF > "${out_dir}/client-secret.yaml"
-apiVersion: v1
-kind: Secret
-metadata:
-  name: skupper-router-inter-edge
-type: kubernetes.io/tls
-data:
-  ca.crt: ${b64_ca}
-  tls.crt: ${b64_client_crt}
-  tls.key: ${b64_client_key}
-EOF
-
-    # 6. Generate cluster/<name>/server.json
-    cat <<EOF > "${out_dir}/server.json"
-{
-  "host": "${host}",
-  "port": ${port}
-}
 EOF
 
     echo " Applying server secret to namespace '${NAMESPACE}'..."
@@ -230,6 +190,53 @@ apply_manifest() {
         "$MANIFEST" \
     | kubectl apply -n "$NAMESPACE" -f - \
         || die "kubectl apply failed."
+
+    echo "  waiting for skupper-router-multi-tenant rollout to complete..."
+    kubectl -n "$NAMESPACE" rollout status daemonset/skupper-router-multi-tenant
+
+}
+
+# ─── full-mesh ───────────────────────────────────────────────────────────────
+
+hash_filter_out() {
+    # returns a filtered hash, excluding key ($1) from hash ref ($2) saving into filtered hash ref ($3)
+    local value=$1
+    local -n items="$2"
+    local -n filtered="$3"
+    for key in "${!items[@]}"; do
+        [ "${key}" = "${value}" ] && continue
+        filtered["${key}"]="${items[${key}]}"
+    done
+}
+
+full_mesh() {
+    # builds a full mesh between edge routers for the daemonset
+    declare -A pods
+    while IFS="," read -r pod ip; do
+        pods["${pod}"]="${ip}"
+    done < <(kubectl -n skupper-multi-tenant get pod -l app=skupper-router -o json | jq -r '.items[] | .metadata.name + "," + .status.podIP')
+
+    for pod in "${!pods[@]}"; do
+        ip="${pods[${pod}]}"
+        # first delete all existing inter-edge connectors for pod
+        while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            echo "    skmanage delete --type connector --name ${name}"
+            echo kubectl -n "$NAMESPACE" exec pod/${pod} -- skmanage delete --type connector --name "${name}" || true
+        done < <(kubectl -n "$NAMESPACE" exec pod/${pod} -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="inter-edge") | .name' 2>/dev/null || true)
+
+        declare -A targets=()
+        hash_filter_out "${pod}" pods targets
+        [ ${#targets[@]} -eq 0 ] && break
+
+        # creating the mesh connector
+        for target in ${targets[@]}; do
+            target_ip_name="${targets[${target}]//./-}"
+            echo skmanage create --type connector --name "mesh/${target}" "host=${target_ip_name}.skupper-router-mesh" "port=45671" "role=inter-edge" "sslProfile=mesh-profile"
+            echo kubectl -n "$NAMESPACE" exec pod/${pod} -- \
+                skmanage create --type connector --name "mesh/${target}" "host=${target_ip_name}.skupper-router-mesh" "port=45671" "role=inter-edge" "sslProfile=mesh-profile" || true
+        done
+    done
 }
 
 # ─── main ────────────────────────────────────────────────────────────────────
@@ -242,6 +249,8 @@ main() {
     uuid=$(generate_uuid)
     cluster=$(kubectl config current-context 2>/dev/null || echo "default")
     [[ -n "$cluster" ]] || cluster="default"
+
+    [[ -d "cluster/${cluster}" ]] || mkdir -p "cluster/${cluster}"
 
     clear
     echo "──────────────────────────────────────────"
@@ -256,11 +265,15 @@ main() {
 
     ensure_namespace
 
-    generate_certificates_and_secrets "*.skupper-router-mesh" "45671" "$cluster"
+    generate_certificates_and_secrets "*.skupper-router-mesh" "$cluster"
 
     apply_manifest "$site_name" "$uuid"
 
     apply_network_policy
+
+    create_ssl_profile
+
+    full_mesh
 
     echo "${NAMESPACE}" > "cluster/${cluster}/namespace"
 
@@ -268,8 +281,6 @@ main() {
     echo " ✓ Installation complete."
     echo " Generated artifacts:"
     echo "   - cluster/${cluster}/server-secret.yaml"
-    echo "   - cluster/${cluster}/client-secret.yaml"
-    echo "   - cluster/${cluster}/server.json"
     echo "   - cluster/${cluster}/namespace"
     echo "──────────────────────────────────────────"
 }

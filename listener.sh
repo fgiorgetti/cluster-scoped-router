@@ -32,13 +32,13 @@ resolve_router_ns() {
         [[ -n "$ns" ]] && ns_list+=("$ns")
     done < <(
         kubectl get daemonsets --all-namespaces --no-headers \
-            --field-selector metadata.name=skupper-router-v3 \
+            --field-selector metadata.name=skupper-router-multi-tenant \
             -o custom-columns=":metadata.namespace" 2>/dev/null
     )
 
     case "${#ns_list[@]}" in
         0)
-            die "No skupper-router-v3 DaemonSet found in any namespace."
+            die "No skupper-router-multi-tenant DaemonSet found in any namespace."
             ;;
         1)
             echo "${ns_list[0]}"
@@ -49,7 +49,7 @@ resolve_router_ns() {
                 menu_args+=("$ns" "")
             done
             dlg --title "Router Namespace" \
-                --menu "Multiple skupper-router-v3 DaemonSets found. Select a namespace:" \
+                --menu "Multiple skupper-router-multi-tenant DaemonSets found. Select a namespace:" \
                 20 60 15 "${menu_args[@]}" || return 1
             result
             ;;
@@ -87,7 +87,7 @@ pick_routing_key() {
     while IFS= read -r key; do
         [[ -n "$key" ]] && keys+=("$key" "")
     done < <(
-        kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-v3 -- \
+        kubectl -n "$ROUTER_NS" exec daemonsets/skupper-router-multi-tenant -- \
             skstat -a 2>/dev/null | grep ' mobile ' \
             | grep -v -E '(\.|/|\$)' | awk '{print $2}'
     )

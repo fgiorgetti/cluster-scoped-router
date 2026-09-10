@@ -50,7 +50,7 @@ kind: DaemonSet
 metadata:
   labels:
     app: skupper-router
-  name: skupper-router-v3
+  name: skupper-router-multi-tenant
 spec:
   selector:
     matchLabels:
@@ -160,7 +160,7 @@ data:
         [
             "sslProfile",
             {
-                "name": "skupper-router-inter-edge-profile",
+                "name": "mesh-profile",
                 "certFile": "/etc/skupper-router-certs/skupper-router-inter-edge/tls.crt",
                 "privateKeyFile": "/etc/skupper-router-certs/skupper-router-inter-edge/tls.key",
                 "caCertFile": "/etc/skupper-router-certs/skupper-router-inter-edge/ca.crt"
@@ -172,7 +172,7 @@ data:
                 "name": "skupper-router-inter-edge",
                 "role": "inter-edge",
                 "port": 45671,
-                "sslProfile": "skupper-router-inter-edge-profile",
+                "sslProfile": "mesh-profile",
                 "saslMechanisms": "EXTERNAL",
                 "authenticatePeer": true
             }
