@@ -33,6 +33,7 @@ resolve_router_ns() {
 
 cluster=$(kubectl config current-context) || die "could not determine current kubectl context"
 [[ -n "$cluster" ]] || die "kubectl current-context is empty"
+cluster="${cluster//\//-}"
 
 ROUTER_NS=$(resolve_router_ns)
 

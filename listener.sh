@@ -290,6 +290,7 @@ main() {
 
     clear
     cluster=$(kubectl config current-context)
+    cluster="${cluster//\//-}"
     ensure_skupper_listener "$cluster" "$routing_key"
     target_port=$(get_routing_key_port "$cluster" "$routing_key")
     write_network_policy "$cluster" "$namespace" "$svc_name" "$target_port"

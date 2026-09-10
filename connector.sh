@@ -178,6 +178,7 @@ main() {
 
     clear
     cluster=$(kubectl config current-context)
+    cluster="${cluster//\//-}"
     echo "──────────────────────────────────────"
     echo " Cluster        : $cluster"
     echo " Namespace      : $namespace"

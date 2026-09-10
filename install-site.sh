@@ -249,6 +249,7 @@ main() {
     uuid=$(generate_uuid)
     cluster=$(kubectl config current-context 2>/dev/null || echo "default")
     [[ -n "$cluster" ]] || cluster="default"
+    cluster="${cluster//\//-}"
 
     [[ -d "cluster/${cluster}" ]] || mkdir -p "cluster/${cluster}"
 
