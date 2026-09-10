@@ -268,7 +268,7 @@ EOF
 
 pick_router_endpoints() {
     kubectl -n "$ROUTER_NS" get pod -l app=skupper-router -o json | \
-        jq -r '.items[] | .metadata.namespace + " " + .metadata.name + " " + (.status | .podIP + " " + (.conditions[] | select(.type == "Ready") | .status))'
+        jq -r '.items[] | select(.status.conditions[] | select(.type == "Ready" and .status == "True")) | .status.podIP'
 }
 
 # ─── main ────────────────────────────────────────────────────────────────────
@@ -304,20 +304,9 @@ main() {
     mkdir -p "$kube_dir"
 
     # Build the endpoints YAML block from router_endpoints
-    local endpoints_yaml=""
-    while IFS=' ' read -r ep_ns ep_name ep_ip ep_ready; do
-        # Map kubectl's "True"/"False" to YAML true/false
-        local ready_val="false"
-        [[ "$ep_ready" == "True" ]] && ready_val="true"
-
-        endpoints_yaml+="  - addresses:
-    - \"${ep_ip}\"
-    conditions:
-      ready: ${ready_val}
-    targetRef:
-      kind: Pod
-      name: ${ep_name}
-      namespace: ${ep_ns}"
+    local addresses_yaml="  - addresses:"
+    while IFS=' ' read -r ep_ip; do
+        addresses_yaml+="    - \"${ep_ip}\""
     done <<< "$router_endpoints"
 
     # Write Kubernetes EndpointSlice YAML
@@ -336,7 +325,14 @@ ports:
     protocol: TCP
     port: ${target_port}
 endpoints:
-${endpoints_yaml}
+${addresses_yaml}
+  conditions:
+    ready: true
+  targetRef:
+    kind: DaemonSet
+    name: skupper-router-multi-tenant
+    namespace: ${ROUTER_NS}"
+
 EOF
 
     # Write Kubernetes Service YAML
