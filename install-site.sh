@@ -222,7 +222,7 @@ full_mesh() {
         while IFS= read -r name; do
             [[ -z "$name" ]] && continue
             echo "    skmanage delete --type connector --name ${name}"
-            echo kubectl -n "$NAMESPACE" exec pod/${pod} -- skmanage delete --type connector --name "${name}" || true
+            kubectl -n "$NAMESPACE" exec pod/${pod} -- skmanage delete --type connector --name "${name}" || true
         done < <(kubectl -n "$NAMESPACE" exec pod/${pod} -- skmanage query --type connector 2>/dev/null | jq -r '.[] | select(.role=="inter-edge") | .name' 2>/dev/null || true)
 
         declare -A targets=()
@@ -233,7 +233,7 @@ full_mesh() {
         for target in ${!targets[@]}; do
             target_ip_name="${targets[${target}]//./-}"
             echo skmanage create --type connector --name "mesh/${target}" "host=${target_ip_name}.skupper-router-mesh" "port=45671" "role=inter-edge" "sslProfile=mesh-profile"
-            echo kubectl -n "$NAMESPACE" exec pod/${pod} -- \
+            kubectl -n "$NAMESPACE" exec pod/${pod} -- \
                 skmanage create --type connector --name "mesh/${target}" "host=${target_ip_name}.skupper-router-mesh" "port=45671" "role=inter-edge" "sslProfile=mesh-profile" || true
         done
     done
