@@ -120,4 +120,30 @@ done
 echo "==> Applying full mesh for cluster '${cluster}'"
 NAMESPACE="$ROUTER_NS" full_mesh
 
+# ─── update endpointslice addresses ─────────────────────────────────────────
+
+echo "==> Updating EndpointSlice addresses for cluster '${cluster}'"
+
+mapfile -t router_ips < <(
+    kubectl -n "$ROUTER_NS" get pod -l app=skupper-router -o json |
+        jq -r '.items[] |
+          select(.status.conditions[] |
+          select(.type == "Ready" and .status == "True")) |
+          .status.podIP'
+)
+[[ ${#router_ips[@]} -eq 0 ]] && die "No Ready router pods found in ${ROUTER_NS}"
+
+addr_json=$(printf '%s\n' "${router_ips[@]}" | jq -Rc '[.,inputs]')
+
+while IFS=' ' read -r es_ns es_name; do
+    [[ -z "$es_ns" || -z "$es_name" ]] && continue
+    echo "  updating endpointslice ${es_ns}/${es_name} addresses: ${router_ips[*]}"
+    kubectl -n "$es_ns" patch endpointslice "$es_name" \
+        --type=merge \
+        -p "{\"endpoints\":[{\"addresses\":${addr_json}}]}"
+done < <(kubectl get endpointslices --all-namespaces \
+    -l 'skupper.io/type=endpointslice' \
+    --no-headers \
+    -o custom-columns=':metadata.namespace,:metadata.name')
+
 echo "==> Done"
