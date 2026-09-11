@@ -67,6 +67,10 @@ for secret_file in "${cluster_dir}/${ROUTER_NS}/kube"/secret_client-*.yaml; do
     mount_path="/etc/skupper-router-certs/${secret_name}"
     echo "  mounting secret '${secret_name}' at ${mount_path}"
     kubectl -n "$ROUTER_NS" patch daemonset skupper-router-multi-tenant --type=json -p \
+        "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/volumeMounts/$(kubectl -n "$ROUTER_NS" get daemonset skupper-router-multi-tenant -o json | jq -r --arg n "${secret_name}" '[.spec.template.spec.containers[0].volumeMounts // [] | to_entries[] | select(.value.name==$n) | .key][0] // "999"')\"}]" 2>/dev/null || true
+    kubectl -n "$ROUTER_NS" patch daemonset skupper-router-multi-tenant --type=json -p \
+        "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/volumes/$(kubectl -n "$ROUTER_NS" get daemonset skupper-router-multi-tenant -o json | jq -r --arg n "${secret_name}" '[.spec.template.spec.volumes // [] | to_entries[] | select(.value.name==$n) | .key][0] // "999"')\"}]" 2>/dev/null || true
+    kubectl -n "$ROUTER_NS" patch daemonset skupper-router-multi-tenant --type=json -p \
         "[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/volumeMounts/-\",\"value\":{\"name\":\"${secret_name}\",\"mountPath\":\"${mount_path}\"}},{\"op\":\"add\",\"path\":\"/spec/template/spec/volumes/-\",\"value\":{\"name\":\"${secret_name}\",\"secret\":{\"secretName\":\"${secret_name}\"}}}]" || true
 done
 
