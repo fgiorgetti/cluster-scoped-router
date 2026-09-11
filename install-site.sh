@@ -10,10 +10,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MANIFEST="${SCRIPT_DIR}/skupper-multi-tenant.yaml"
 INTER_EDGE_PORT=45671
 
-TMPFILE=$(mktemp)
-CERT_TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPFILE" "$CERT_TMPDIR"' EXIT
-
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 die() {
@@ -244,6 +240,10 @@ full_mesh() {
 main() {
     local site_name uuid cluster
 
+    TMPFILE=$(mktemp)
+    CERT_TMPDIR=$(mktemp -d)
+    trap 'rm -rf "$TMPFILE" "$CERT_TMPDIR"' EXIT
+
     NAMESPACE=$(pick_namespace)
     site_name=$(pick_site_name)
     uuid=$(generate_uuid)
@@ -284,4 +284,6 @@ main() {
     echo "──────────────────────────────────────────"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

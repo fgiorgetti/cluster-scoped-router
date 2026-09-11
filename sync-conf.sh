@@ -6,6 +6,9 @@ set -uo pipefail
 
 shopt -s nullglob
 
+# shellcheck source=install-site.sh
+source "$(dirname "$0")/install-site.sh"
+
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 die() {
@@ -68,14 +71,23 @@ for secret_file in "${cluster_dir}/${ROUTER_NS}/kube"/secret_client-*.yaml; do
     echo "  mounting secret '${secret_name}' at ${mount_path}"
     kubectl -n "$ROUTER_NS" patch daemonset skupper-router-multi-tenant --type=json -p \
         "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/volumeMounts/$(kubectl -n "$ROUTER_NS" get daemonset skupper-router-multi-tenant -o json | jq -r --arg n "${secret_name}" '[.spec.template.spec.containers[0].volumeMounts // [] | to_entries[] | select(.value.name==$n) | .key][0] // "999"')\"}]" 2>/dev/null || true
+    echo "  waiting for skupper-router-multi-tenant rollout to complete..."
+    kubectl -n "$ROUTER_NS" rollout status daemonset/skupper-router-multi-tenant
     kubectl -n "$ROUTER_NS" patch daemonset skupper-router-multi-tenant --type=json -p \
         "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/volumes/$(kubectl -n "$ROUTER_NS" get daemonset skupper-router-multi-tenant -o json | jq -r --arg n "${secret_name}" '[.spec.template.spec.volumes // [] | to_entries[] | select(.value.name==$n) | .key][0] // "999"')\"}]" 2>/dev/null || true
+    echo "  waiting for skupper-router-multi-tenant rollout to complete..."
+    kubectl -n "$ROUTER_NS" rollout status daemonset/skupper-router-multi-tenant
     kubectl -n "$ROUTER_NS" patch daemonset skupper-router-multi-tenant --type=json -p \
         "[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/volumeMounts/-\",\"value\":{\"name\":\"${secret_name}\",\"mountPath\":\"${mount_path}\"}},{\"op\":\"add\",\"path\":\"/spec/template/spec/volumes/-\",\"value\":{\"name\":\"${secret_name}\",\"secret\":{\"secretName\":\"${secret_name}\"}}}]" || true
+    echo "  waiting for skupper-router-multi-tenant rollout to complete..."
+    kubectl -n "$ROUTER_NS" rollout status daemonset/skupper-router-multi-tenant
 done
 
-echo "  waiting for skupper-router-multi-tenant rollout to complete..."
-kubectl -n "$ROUTER_NS" rollout status daemonset/skupper-router-multi-tenant
+echo "  waiting for all skupper-router pods to be ready..."
+kubectl -n "$ROUTER_NS" wait pod \
+    --selector app=skupper-router \
+    --for=condition=Ready \
+    --timeout=120s
 
 # ─── router entity apply ─────────────────────────────────────────────────────
 
@@ -104,5 +116,8 @@ for json_file in "${cluster_dir}"/*/router/*/*.json; do
         cat "${json_file}" | kubectl -n "$ROUTER_NS" exec -i "pod/${pod}" -- skmanage create --type "${entity_type}" --stdin
     done
 done
+
+echo "==> Applying full mesh for cluster '${cluster}'"
+NAMESPACE="$ROUTER_NS" full_mesh
 
 echo "==> Done"
