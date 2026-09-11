@@ -267,6 +267,7 @@ tenant cluster** in the VAN. Steps 3–5 are per-cluster and per-workload.
 To tear down a site completely and remove all generated configuration:
 
 ```bash
+./cleanup-conf.sh
 kubectl delete ns <router-namespace>
 rm -rf cluster/
 ```
